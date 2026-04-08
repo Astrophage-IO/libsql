@@ -2969,6 +2969,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsql-graph"
+version = "0.9.30"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "libsql-hrana"
 version = "0.9.30"
 dependencies = [
