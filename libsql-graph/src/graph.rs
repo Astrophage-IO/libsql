@@ -234,6 +234,18 @@ impl GraphEngine {
         self.db.header().edge_count
     }
 
+    pub fn db(&mut self) -> &mut GraphDatabase {
+        &mut self.db
+    }
+
+    pub fn node_store(&self) -> &NodeStore {
+        &self.node_store
+    }
+
+    pub fn rel_store(&self) -> &RelStore {
+        &self.rel_store
+    }
+
     fn addr_to_node_id(&self, addr: RecordAddress) -> u64 {
         let rpp = self.node_store.records_per_page() as u64;
         let page_offset = (addr.page - self.db.header().node_store_root) as u64;

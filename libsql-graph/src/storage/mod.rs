@@ -4,6 +4,7 @@ pub mod header;
 pub mod node_store;
 pub mod page;
 pub mod pager_bridge;
+pub mod property_store;
 pub mod record;
 pub mod rel_store;
 pub mod token_store;
