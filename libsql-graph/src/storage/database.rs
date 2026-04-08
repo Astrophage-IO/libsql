@@ -123,6 +123,10 @@ impl GraphDatabase {
         &self.header
     }
 
+    pub fn header_mut(&mut self) -> &mut GraphHeader {
+        &mut self.header
+    }
+
     pub fn pager(&mut self) -> &mut GraphPager {
         &mut self.pager
     }
