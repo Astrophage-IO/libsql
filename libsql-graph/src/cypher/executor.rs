@@ -2140,4 +2140,16 @@ mod tests {
         drop(engine);
         let _ = std::fs::remove_file(&path);
     }
+
+    #[test]
+    fn test_count_star() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(&mut engine, "MATCH (a:Person) RETURN count(*)");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Integer(3));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
 }

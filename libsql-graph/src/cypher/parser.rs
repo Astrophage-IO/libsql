@@ -658,7 +658,9 @@ impl Parser {
                 } else if *self.peek() == Token::LParen {
                     self.advance();
                     let mut args = Vec::new();
-                    if *self.peek() != Token::RParen {
+                    if *self.peek() == Token::Star {
+                        self.advance(); // count(*)
+                    } else if *self.peek() != Token::RParen {
                         args.push(self.parse_expr()?);
                         while *self.peek() == Token::Comma {
                             self.advance();
