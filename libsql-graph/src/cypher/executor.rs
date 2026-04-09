@@ -212,6 +212,28 @@ pub fn execute(
                 )?;
             }
             PlanStep::Distinct => {}
+            PlanStep::With { items, where_clause } => {
+                let mut new_table = Vec::new();
+                for bindings in &binding_table {
+                    let mut new_bindings = HashMap::new();
+                    for item in items {
+                        let val = eval_expr(engine, &item.expr, bindings, params);
+                        let key = item
+                            .alias
+                            .clone()
+                            .unwrap_or_else(|| crate::cypher::executor::expr_name(&item.expr));
+                        new_bindings.insert(key, val);
+                    }
+                    if let Some(ref pred) = where_clause {
+                        let val = eval_expr(engine, pred, &new_bindings, params);
+                        if !val.is_truthy() {
+                            continue;
+                        }
+                    }
+                    new_table.push(new_bindings);
+                }
+                binding_table = new_table;
+            }
             PlanStep::Project { items } => {
                 if items.len() == 1 && items[0].expr == Expr::Variable("*".to_string()) {
                     let mut all_vars: Vec<String> = binding_table
@@ -314,11 +336,12 @@ pub fn execute(
 
 fn exec_node_scan(
     engine: &mut GraphEngine,
-    _current: &[Bindings],
+    current: &[Bindings],
     variable: &str,
     label: &Option<String>,
     properties: &[(String, Literal)],
 ) -> Result<Vec<Bindings>, GraphError> {
+    let has_existing_bindings = current.iter().any(|b| !b.is_empty());
     let mut results = Vec::new();
     let label_token = match label {
         Some(name) => {
@@ -365,11 +388,21 @@ fn exec_node_scan(
             continue;
         }
 
-        let mut bindings = HashMap::new();
-        if !variable.is_empty() {
-            bindings.insert(variable.to_string(), Value::Node(id));
+        if has_existing_bindings {
+            for existing in current {
+                let mut bindings = existing.clone();
+                if !variable.is_empty() {
+                    bindings.insert(variable.to_string(), Value::Node(id));
+                }
+                results.push(bindings);
+            }
+        } else {
+            let mut bindings = HashMap::new();
+            if !variable.is_empty() {
+                bindings.insert(variable.to_string(), Value::Node(id));
+            }
+            results.push(bindings);
         }
-        results.push(bindings);
     }
 
     Ok(results)
@@ -646,6 +679,30 @@ fn eval_expr(
         Expr::Literal(lit) => Value::from_literal(lit),
         Expr::Variable(name) => bindings.get(name).cloned().unwrap_or(Value::Null),
         Expr::Parameter(name) => params.get(name).cloned().unwrap_or(Value::Null),
+        Expr::Case {
+            operand,
+            when_clauses,
+            else_clause,
+        } => {
+            let subject = operand
+                .as_ref()
+                .map(|e| eval_expr(engine, e, bindings, params));
+            for (condition, result) in when_clauses {
+                let cond_val = eval_expr(engine, condition, bindings, params);
+                let matches = if let Some(ref subj) = subject {
+                    cond_val == *subj
+                } else {
+                    cond_val.is_truthy()
+                };
+                if matches {
+                    return eval_expr(engine, result, bindings, params);
+                }
+            }
+            else_clause
+                .as_ref()
+                .map(|e| eval_expr(engine, e, bindings, params))
+                .unwrap_or(Value::Null)
+        }
         Expr::Property(var, prop) => {
             let node_id = match bindings.get(var) {
                 Some(Value::Node(id)) => *id,
@@ -1583,6 +1640,111 @@ mod tests {
         let rel = engine.get_rel(0).unwrap();
         let name = engine.get_rel_type_name(rel.type_token_id).unwrap();
         assert_eq!(name, "KNOWS");
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_case_when_simple() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN a.name, CASE WHEN a.age > 30 THEN 'senior' ELSE 'junior' END",
+        );
+        assert_eq!(result.rows.len(), 3);
+        for row in &result.rows {
+            match &row[0] {
+                Value::String(name) if name == "Alice" => {
+                    assert_eq!(row[1], Value::String("junior".into()));
+                }
+                Value::String(name) if name == "Charlie" => {
+                    assert_eq!(row[1], Value::String("senior".into()));
+                }
+                Value::String(name) if name == "Bob" => {
+                    assert_eq!(row[1], Value::String("junior".into()));
+                }
+                _ => {}
+            }
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_case_when_value() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN CASE a.age WHEN 30 THEN 'thirty' WHEN 25 THEN 'twenty-five' ELSE 'other' END",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("thirty".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_with_clause() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WITH a.name AS name, a.age AS age MATCH (b:Person) WHERE b.name = name RETURN name, age",
+        );
+        assert_eq!(result.rows.len(), 3);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_with_where_filter() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WITH a, a.age AS age WHERE age > 28 RETURN a.name",
+        );
+        let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&&Value::String("Alice".into())));
+        assert!(names.contains(&&Value::String("Charlie".into())));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_schema_introspection() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let schema = engine.schema().unwrap();
+        assert_eq!(schema.node_count, 3);
+        assert_eq!(schema.edge_count, 3);
+
+        let label_names: Vec<&str> = schema.labels.iter().map(|l| l.name.as_str()).collect();
+        assert!(label_names.contains(&"Person"));
+
+        let rel_type_names: Vec<&str> = schema.rel_types.iter().map(|r| r.name.as_str()).collect();
+        assert!(rel_type_names.contains(&"KNOWS"));
+        assert!(rel_type_names.contains(&"FOLLOWS"));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_property_keys() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let keys = engine.property_keys().unwrap();
+        assert!(keys.contains(&"name".to_string()));
+        assert!(keys.contains(&"age".to_string()));
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

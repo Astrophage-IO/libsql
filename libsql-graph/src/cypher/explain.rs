@@ -50,6 +50,7 @@ fn operation_name(step: &PlanStep) -> String {
         PlanStep::OrderBy { .. } => "OrderBy".into(),
         PlanStep::Limit { .. } => "Limit".into(),
         PlanStep::Distinct => "Distinct".into(),
+        PlanStep::With { .. } => "With".into(),
         PlanStep::Merge { .. } => "Merge".into(),
     }
 }
@@ -171,6 +172,10 @@ fn format_step(step: &PlanStep) -> String {
         }
         PlanStep::Limit { count } => format!("Limit({count})"),
         PlanStep::Distinct => "Distinct".into(),
+        PlanStep::With { items, .. } => {
+            let cols: Vec<String> = items.iter().map(|i| format_expr(&i.expr)).collect();
+            format!("With({})", cols.join(", "))
+        }
         PlanStep::Merge {
             variable,
             label,
@@ -230,6 +235,9 @@ fn format_expr(expr: &crate::cypher::ast::Expr) -> String {
             format!("{op_str} {}", format_expr(inner))
         }
         Expr::Parameter(name) => format!("${name}"),
+        Expr::Case { when_clauses, .. } => {
+            format!("CASE[{}]", when_clauses.len())
+        }
     }
 }
 
@@ -241,6 +249,7 @@ fn estimate_rows(step: &PlanStep) -> String {
         PlanStep::Filter { .. } => "selectivity".into(),
         PlanStep::Limit { count } => format!("{count}"),
         PlanStep::Distinct => "<=input".into(),
+        PlanStep::With { .. } => "<=input".into(),
         _ => "-".into(),
     }
 }

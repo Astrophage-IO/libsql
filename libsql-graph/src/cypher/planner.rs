@@ -55,6 +55,10 @@ pub enum PlanStep {
         count: u64,
     },
     Distinct,
+    With {
+        items: Vec<ReturnItem>,
+        where_clause: Option<Expr>,
+    },
     Merge {
         variable: Option<String>,
         label: Option<String>,
@@ -122,6 +126,18 @@ fn plan_match(m: &MatchStatement) -> Result<QueryPlan, String> {
         steps.push(PlanStep::Filter {
             predicate: where_expr.clone(),
         });
+    }
+
+    if let Some(ref with) = m.with_clause {
+        steps.push(PlanStep::With {
+            items: with.items.clone(),
+            where_clause: with.where_clause.clone(),
+        });
+    }
+
+    if let Some(ref next) = m.next_match {
+        let next_plan = plan_match(next)?;
+        steps.extend(next_plan.steps);
     }
 
     for set_clause in &m.set_clauses {

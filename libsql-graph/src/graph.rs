@@ -600,6 +600,44 @@ impl GraphEngine {
         &self.rel_store
     }
 
+    pub fn schema(&mut self) -> Result<GraphSchema, GraphError> {
+        let mut labels = Vec::new();
+        let mut rel_types = Vec::new();
+        let next_token = self.db.header().next_token_id;
+
+        for id in 0..next_token {
+            let token = self.token_store.read_token(self.db.pager(), id)?;
+            if !token.in_use() {
+                continue;
+            }
+            let name = token.name_str().to_string();
+            match token.kind() {
+                0 => labels.push(LabelInfo { token_id: id, name }),
+                1 => rel_types.push(RelTypeInfo { token_id: id, name }),
+                _ => {}
+            }
+        }
+
+        Ok(GraphSchema {
+            node_count: self.db.header().node_count,
+            edge_count: self.db.header().edge_count,
+            labels,
+            rel_types,
+        })
+    }
+
+    pub fn property_keys(&mut self) -> Result<Vec<String>, GraphError> {
+        let mut keys = Vec::new();
+        let next_token = self.db.header().next_token_id;
+        for id in 0..next_token {
+            let token = self.token_store.read_token(self.db.pager(), id)?;
+            if token.in_use() {
+                keys.push(token.name_str().to_string());
+            }
+        }
+        Ok(keys)
+    }
+
     fn unlink_rel_from_chain(
         &mut self,
         rel_addr: RecordAddress,
@@ -673,6 +711,26 @@ pub enum Direction {
     Outgoing,
     Incoming,
     Both,
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphSchema {
+    pub node_count: u64,
+    pub edge_count: u64,
+    pub labels: Vec<LabelInfo>,
+    pub rel_types: Vec<RelTypeInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LabelInfo {
+    pub token_id: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelTypeInfo {
+    pub token_id: u32,
+    pub name: String,
 }
 
 #[cfg(test)]

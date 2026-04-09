@@ -27,6 +27,13 @@ pub enum Token {
     Merge,
     OnCreate,
     OnMatch,
+    With,
+    Optional,
+    Case,
+    When,
+    Then,
+    Else,
+    End,
 
     Ident(String),
     Integer(i64),
@@ -310,7 +317,14 @@ fn keyword_or_ident(s: String) -> Token {
         "STARTS" => Token::StartsWith,
         "ENDS" => Token::EndsWith,
         "MERGE" => Token::Merge,
-        "ON" => Token::OnCreate, // resolved by parser context
+        "ON" => Token::OnCreate,
+        "WITH" => Token::With,
+        "OPTIONAL" => Token::Optional,
+        "CASE" => Token::Case,
+        "WHEN" => Token::When,
+        "THEN" => Token::Then,
+        "ELSE" => Token::Else,
+        "END" => Token::End,
         _ => Token::Ident(s),
     }
 }

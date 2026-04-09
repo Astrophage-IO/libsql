@@ -9,10 +9,19 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchStatement {
     pub pattern: Pattern,
+    pub optional: bool,
     pub where_clause: Option<Expr>,
+    pub with_clause: Option<WithClause>,
+    pub next_match: Option<Box<MatchStatement>>,
     pub set_clauses: Vec<SetClause>,
     pub delete: Option<DeleteClause>,
     pub return_clause: Option<ReturnClause>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    pub items: Vec<ReturnItem>,
+    pub where_clause: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +136,11 @@ pub enum Expr {
     BinaryOp(Box<Expr>, BinOp, Box<Expr>),
     UnaryOp(UnaryOp, Box<Expr>),
     Parameter(String),
+    Case {
+        operand: Option<Box<Expr>>,
+        when_clauses: Vec<(Expr, Expr)>,
+        else_clause: Option<Box<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

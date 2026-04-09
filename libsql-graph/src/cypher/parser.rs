@@ -39,7 +39,7 @@ impl Parser {
 
     pub fn parse(&mut self) -> Result<Statement, String> {
         match self.peek() {
-            Token::Match => self.parse_match(),
+            Token::Match | Token::Optional => self.parse_match(),
             Token::Create => self.parse_create(),
             Token::Delete | Token::Detach => self.parse_delete_stmt(),
             Token::Merge => self.parse_merge(),
@@ -48,12 +48,34 @@ impl Parser {
     }
 
     fn parse_match(&mut self) -> Result<Statement, String> {
+        let optional = if *self.peek() == Token::Optional {
+            self.advance();
+            true
+        } else {
+            false
+        };
         self.expect(&Token::Match)?;
         let pattern = self.parse_pattern()?;
 
         let where_clause = if *self.peek() == Token::Where {
             self.advance();
             Some(self.parse_expr()?)
+        } else {
+            None
+        };
+
+        let with_clause = if *self.peek() == Token::With {
+            Some(self.parse_with()?)
+        } else {
+            None
+        };
+
+        let next_match = if *self.peek() == Token::Match || *self.peek() == Token::Optional {
+            if let Statement::Match(m) = self.parse_match()? {
+                Some(Box::new(m))
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -82,11 +104,34 @@ impl Parser {
 
         Ok(Statement::Match(MatchStatement {
             pattern,
+            optional,
             where_clause,
+            with_clause,
+            next_match,
             set_clauses,
             delete,
             return_clause,
         }))
+    }
+
+    fn parse_with(&mut self) -> Result<WithClause, String> {
+        self.expect(&Token::With)?;
+        let mut items = Vec::new();
+        items.push(self.parse_return_item()?);
+        while *self.peek() == Token::Comma {
+            self.advance();
+            items.push(self.parse_return_item()?);
+        }
+        let where_clause = if *self.peek() == Token::Where {
+            self.advance();
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(WithClause {
+            items,
+            where_clause,
+        })
     }
 
     fn parse_create(&mut self) -> Result<Statement, String> {
@@ -497,13 +542,13 @@ impl Parser {
             Token::In => BinOp::In,
             Token::StartsWith => {
                 self.advance();
-                self.expect(&Token::Ident("WITH".into())).map_err(|_| "expected WITH after STARTS".to_string())?;
+                self.expect(&Token::With).map_err(|_| "expected WITH after STARTS".to_string())?;
                 let right = self.parse_addition()?;
                 return Ok(Expr::BinaryOp(Box::new(left), BinOp::StartsWith, Box::new(right)));
             }
             Token::EndsWith => {
                 self.advance();
-                self.expect(&Token::Ident("WITH".into())).map_err(|_| "expected WITH after ENDS".to_string())?;
+                self.expect(&Token::With).map_err(|_| "expected WITH after ENDS".to_string())?;
                 let right = self.parse_addition()?;
                 return Ok(Expr::BinaryOp(Box::new(left), BinOp::EndsWith, Box::new(right)));
             }
@@ -608,6 +653,34 @@ impl Parser {
                 let expr = self.parse_expr()?;
                 self.expect(&Token::RParen)?;
                 Ok(expr)
+            }
+            Token::Case => {
+                self.advance();
+                let operand = if *self.peek() != Token::When {
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                let mut when_clauses = Vec::new();
+                while *self.peek() == Token::When {
+                    self.advance();
+                    let condition = self.parse_expr()?;
+                    self.expect(&Token::Then)?;
+                    let result = self.parse_expr()?;
+                    when_clauses.push((condition, result));
+                }
+                let else_clause = if *self.peek() == Token::Else {
+                    self.advance();
+                    Some(Box::new(self.parse_expr()?))
+                } else {
+                    None
+                };
+                self.expect(&Token::End)?;
+                Ok(Expr::Case {
+                    operand,
+                    when_clauses,
+                    else_clause,
+                })
             }
             tok => Err(format!("unexpected token in expression: {:?}", tok)),
         }
