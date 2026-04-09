@@ -8,6 +8,7 @@ use crate::storage::record::{
 pub const TOKEN_FLAG_IN_USE: u8 = 0b1000_0000;
 pub const TOKEN_KIND_LABEL: u8 = 0;
 pub const TOKEN_KIND_REL_TYPE: u8 = 1;
+pub const TOKEN_KIND_PROPERTY: u8 = 2;
 pub const TOKEN_MAX_INLINE_NAME: usize = 27;
 
 #[derive(Debug, Clone)]
@@ -26,7 +27,7 @@ impl TokenRecord {
         name_buf[..len].copy_from_slice(&bytes[..len]);
 
         Self {
-            flags: TOKEN_FLAG_IN_USE | ((kind & 1) << 6),
+            flags: TOKEN_FLAG_IN_USE | ((kind & 1) << 6) | ((kind & 2) << 4),
             token_id,
             name_length: len as u8,
             name: name_buf,
@@ -38,7 +39,7 @@ impl TokenRecord {
     }
 
     pub fn kind(&self) -> u8 {
-        (self.flags >> 6) & 1
+        ((self.flags >> 6) & 1) | ((self.flags >> 4) & 2)
     }
 
     pub fn name_str(&self) -> &str {

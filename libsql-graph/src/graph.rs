@@ -14,13 +14,47 @@ use crate::storage::property_store::{
 use crate::storage::record::RecordAddress;
 use crate::storage::rel_store::{RelRecord, RelStore};
 use crate::storage::dense::RelGroupStore;
+use crate::storage::label_index::LabelIndex;
 use crate::storage::stats::GraphStats;
 use crate::storage::string_overflow::StringOverflowStore;
 use crate::storage::token_store::{
-    TokenRecord, TokenStore, TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE,
+    TokenRecord, TokenStore, TOKEN_KIND_LABEL, TOKEN_KIND_PROPERTY, TOKEN_KIND_REL_TYPE,
 };
 
 pub type DefaultGraphEngine = GraphEngine<FilePager>;
+
+fn serialize_label_index_roots(map: &HashMap<u32, u32>, buf: &mut [u8]) -> usize {
+    let count = map.len() as u32;
+    buf[0..4].copy_from_slice(&count.to_le_bytes());
+    let mut pos = 4;
+    for (&k, &v) in map {
+        buf[pos..pos + 4].copy_from_slice(&k.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&v.to_le_bytes());
+        pos += 4;
+    }
+    pos
+}
+
+fn deserialize_label_index_roots(buf: &[u8]) -> HashMap<u32, u32> {
+    if buf.len() < 4 {
+        return HashMap::new();
+    }
+    let count = u32::from_le_bytes(buf[0..4].try_into().unwrap_or([0; 4])) as usize;
+    if count > 10_000 || buf.len() < 4 + count * 8 {
+        return HashMap::new();
+    }
+    let mut map = HashMap::with_capacity(count);
+    let mut pos = 4;
+    for _ in 0..count {
+        let k = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap_or([0; 4]));
+        pos += 4;
+        let v = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap_or([0; 4]));
+        pos += 4;
+        map.insert(k, v);
+    }
+    map
+}
 
 pub struct GraphEngine<P: Pager> {
     db: GraphDatabase<P>,
@@ -30,6 +64,9 @@ pub struct GraphEngine<P: Pager> {
     property_store: PropertyStore,
     string_overflow: StringOverflowStore,
     rel_group_store: RelGroupStore,
+    label_index: LabelIndex,
+    label_index_roots: HashMap<u32, u32>,
+    label_index_dirty: Vec<(u32, u64, bool)>,
     stats: GraphStats,
     tx_active: bool,
 }
@@ -44,6 +81,12 @@ impl GraphEngine<FilePager> {
         stats_page.data_mut()?[..].fill(0);
         db.pager().write_page(&stats_page)?;
         db.header_mut().stats_page = stats_pgno;
+
+        let (li_pgno, mut li_page) = db.pager().alloc_page()?;
+        li_page.data_mut()?[..].fill(0);
+        db.pager().write_page(&li_page)?;
+        db.header_mut().label_index_page = li_pgno;
+
         let mut header_page = db.pager().get_page(1)?;
         db.header().write(header_page.data_mut()?)?;
         db.pager().write_page(&header_page)?;
@@ -57,6 +100,9 @@ impl GraphEngine<FilePager> {
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
+            label_index: LabelIndex::new(ps),
+            label_index_roots: HashMap::new(),
+            label_index_dirty: Vec::new(),
             stats: GraphStats::new(),
             db,
             tx_active: false,
@@ -75,6 +121,14 @@ impl GraphEngine<FilePager> {
             GraphStats::new()
         };
 
+        let li_pgno = db.header().label_index_page;
+        let label_index_roots = if li_pgno > 0 {
+            let page = db.pager().get_page(li_pgno)?;
+            deserialize_label_index_roots(page.data())
+        } else {
+            HashMap::new()
+        };
+
         let h = db.header();
         Ok(Self {
             node_store: NodeStore::new(h.node_store_root, ps),
@@ -83,6 +137,9 @@ impl GraphEngine<FilePager> {
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
+            label_index: LabelIndex::new(ps),
+            label_index_roots,
+            label_index_dirty: Vec::new(),
             stats,
             db,
             tx_active: false,
@@ -105,6 +162,17 @@ impl<P: Pager> GraphEngine<P> {
             GraphStats::new()
         };
 
+        let li_pgno = db.header().label_index_page;
+        let label_index_roots = if li_pgno > 0 {
+            db.pager()
+                .get_page(li_pgno)
+                .ok()
+                .map(|page| deserialize_label_index_roots(page.data()))
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
         let h = db.header();
         Self {
             node_store: NodeStore::new(h.node_store_root, ps),
@@ -113,6 +181,9 @@ impl<P: Pager> GraphEngine<P> {
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
+            label_index: LabelIndex::new(ps),
+            label_index_roots,
+            label_index_dirty: Vec::new(),
             stats,
             db,
             tx_active: false,
@@ -155,6 +226,15 @@ impl<P: Pager> GraphEngine<P> {
         } else {
             self.stats = GraphStats::new();
         }
+
+        let li_pgno = self.db.header().label_index_page;
+        if li_pgno > 0 {
+            let page = self.db.pager().get_page(li_pgno)?;
+            self.label_index_roots = deserialize_label_index_roots(page.data());
+        } else {
+            self.label_index_roots = HashMap::new();
+        }
+        self.label_index_dirty.clear();
         Ok(())
     }
 
@@ -238,6 +318,8 @@ impl<P: Pager> GraphEngine<P> {
         let record = NodeRecord::new(label_id);
         self.node_store
             .create_node(self.db.pager(), node_id, &record)?;
+
+        self.label_index_dirty.push((label_id, node_id, true));
 
         self.db.header_mut().node_count += 1;
         self.stats.node_count += 1;
@@ -448,8 +530,12 @@ impl<P: Pager> GraphEngine<P> {
     }
 
     pub fn label_index_roots(&mut self) -> HashMap<u32, u32> {
-        let _ = self;
-        HashMap::new()
+        if (!self.label_index_dirty.is_empty() || self.label_index_roots.is_empty())
+            && self.db.header().next_node_id > 0
+        {
+            let _ = self.rebuild_label_index_pages();
+        }
+        self.label_index_roots.clone()
     }
 
     pub fn label_name_to_id(&mut self) -> HashMap<String, u32> {
@@ -528,26 +614,35 @@ impl<P: Pager> GraphEngine<P> {
 
     pub fn get_or_create_prop_key(&mut self, name: &str) -> Result<u16, GraphError> {
         let next = self.db.header().next_token_id;
-        if let Some(id) = self.token_store.find_by_name(
-            self.db.pager(),
-            name,
-            TOKEN_KIND_LABEL,
-            next,
-        )? {
-            return Ok(id as u16);
-        }
-        if let Some(id) = self.token_store.find_by_name(
-            self.db.pager(),
-            name,
-            TOKEN_KIND_REL_TYPE,
-            next,
-        )? {
-            return Ok(id as u16);
+        for kind in [TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE, TOKEN_KIND_PROPERTY] {
+            if let Some(id) = self.token_store.find_by_name(
+                self.db.pager(),
+                name,
+                kind,
+                next,
+            )? {
+                return Ok(id as u16);
+            }
         }
         let id = self.db.next_token_id();
-        let record = TokenRecord::new(id, TOKEN_KIND_LABEL, name);
+        let record = TokenRecord::new(id, TOKEN_KIND_PROPERTY, name);
         self.token_store.create_token(self.db.pager(), &record)?;
         Ok(id as u16)
+    }
+
+    fn find_prop_key(&mut self, name: &str) -> Result<Option<u16>, GraphError> {
+        let next = self.db.header().next_token_id;
+        for kind in [TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE, TOKEN_KIND_PROPERTY] {
+            if let Some(id) = self.token_store.find_by_name(
+                self.db.pager(),
+                name,
+                kind,
+                next,
+            )? {
+                return Ok(Some(id as u16));
+            }
+        }
+        Ok(None)
     }
 
     fn store_property_value(
@@ -635,24 +730,9 @@ impl<P: Pager> GraphEngine<P> {
         node_id: u64,
         key: &str,
     ) -> Result<Option<PropertyValue>, GraphError> {
-        let key_id = {
-            let next = self.db.header().next_token_id;
-            let label = self.token_store.find_by_name(
-                self.db.pager(),
-                key,
-                TOKEN_KIND_LABEL,
-                next,
-            )?;
-            let rel = self.token_store.find_by_name(
-                self.db.pager(),
-                key,
-                TOKEN_KIND_REL_TYPE,
-                next,
-            )?;
-            match label.or(rel) {
-                Some(id) => id as u16,
-                None => return Ok(None),
-            }
+        let key_id = match self.find_prop_key(key)? {
+            Some(id) => id,
+            None => return Ok(None),
         };
 
         let node = self.node_store.read_node(self.db.pager(), node_id)?;
@@ -750,24 +830,9 @@ impl<P: Pager> GraphEngine<P> {
         rel_id: u64,
         key: &str,
     ) -> Result<Option<PropertyValue>, GraphError> {
-        let key_id = {
-            let next = self.db.header().next_token_id;
-            let label = self.token_store.find_by_name(
-                self.db.pager(),
-                key,
-                TOKEN_KIND_LABEL,
-                next,
-            )?;
-            let rel = self.token_store.find_by_name(
-                self.db.pager(),
-                key,
-                TOKEN_KIND_REL_TYPE,
-                next,
-            )?;
-            match label.or(rel) {
-                Some(id) => id as u16,
-                None => return Ok(None),
-            }
+        let key_id = match self.find_prop_key(key)? {
+            Some(id) => id,
+            None => return Ok(None),
         };
 
         let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
@@ -844,6 +909,7 @@ impl<P: Pager> GraphEngine<P> {
         }
 
         let label_id = node.label_token_id;
+        self.label_index_dirty.push((label_id, node_id, false));
         let node_addr = self.node_store.address(node_id);
         let mut rel_ids_to_delete = Vec::new();
         let mut current = node.first_rel;
@@ -1100,6 +1166,61 @@ impl<P: Pager> GraphEngine<P> {
             data.fill(0);
             self.stats.serialize(data)?;
             self.db.pager().write_page(&page)?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_label_index_pages(&mut self) -> Result<(), GraphError> {
+        self.label_index_dirty.clear();
+
+        let was_active = self.tx_active;
+        if !was_active {
+            self.db.pager().begin_write()?;
+            self.tx_active = true;
+        }
+
+        let max_node = self.db.header().next_node_id;
+        let mut label_nodes: HashMap<u32, Vec<u64>> = HashMap::new();
+        for id in 0..max_node {
+            let node = self.node_store.read_node(self.db.pager(), id)?;
+            if node.in_use() {
+                label_nodes.entry(node.label_token_id).or_default().push(id);
+            }
+        }
+
+        let mut new_roots = HashMap::new();
+        for (&label_id, node_ids) in &label_nodes {
+            let (root, mut p) = self.db.pager().alloc_page()?;
+            p.data_mut()?.fill(0);
+            self.db.pager().write_page(&p)?;
+            for &nid in node_ids {
+                self.label_index.set_label(self.db.pager(), label_id, nid, root)?;
+            }
+            new_roots.insert(label_id, root);
+        }
+        self.label_index_roots = new_roots;
+
+        let mut li_pgno = self.db.header().label_index_page;
+        if li_pgno == 0 && !self.label_index_roots.is_empty() {
+            let (pgno, mut p) = self.db.pager().alloc_page()?;
+            p.data_mut()?[..].fill(0);
+            self.db.pager().write_page(&p)?;
+            li_pgno = pgno;
+            self.db.header_mut().label_index_page = li_pgno;
+        }
+        if li_pgno > 0 {
+            let mut page = self.db.pager().get_page(li_pgno)?;
+            let data = page.data_mut()?;
+            data.fill(0);
+            serialize_label_index_roots(&self.label_index_roots, data);
+            self.db.pager().write_page(&page)?;
+        }
+
+        self.flush_header_page()?;
+
+        if !was_active {
+            self.db.pager().commit()?;
+            self.tx_active = false;
         }
         Ok(())
     }
@@ -2488,5 +2609,233 @@ mod tests {
 
         let result2 = executor::execute(&mut engine, &optimized2, &HashMap::new()).unwrap();
         assert_eq!(result2.rows.len(), 0);
+    }
+
+    #[test]
+    fn test_create_rel_with_inline_properties() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let result = engine
+            .query("CREATE (a:Person), (b:Person), (a)-[:KNOWS {since: 2020, weight: 5}]->(b)")
+            .unwrap();
+        assert_eq!(result.stats.nodes_created, 2);
+        assert_eq!(result.stats.relationships_created, 1);
+        assert!(result.stats.properties_set >= 2);
+
+        let val = engine.get_rel_property(0, "since").unwrap();
+        assert_eq!(val, Some(PropertyValue::Int32(2020)));
+
+        let weight = engine.get_rel_property(0, "weight").unwrap();
+        assert_eq!(weight, Some(PropertyValue::Int32(5)));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_persistence_end_to_end() {
+        let path = temp_path();
+
+        let person_label;
+        let city_label;
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+            for _ in 0..10 {
+                engine.create_node("Person").unwrap();
+            }
+            for _ in 0..5 {
+                engine.create_node("City").unwrap();
+            }
+
+            for i in 0..8u64 {
+                engine.create_relationship(i, i + 1, "KNOWS").unwrap();
+            }
+            for i in 0..3u64 {
+                engine
+                    .create_relationship(i, 10 + (i % 5), "LIVES_IN")
+                    .unwrap();
+            }
+
+            person_label = engine.get_node(0).unwrap().label_token_id;
+            city_label = engine.get_node(10).unwrap().label_token_id;
+
+            assert_eq!(engine.stats().label_counts.get(&person_label), Some(&10));
+            assert_eq!(engine.stats().label_counts.get(&city_label), Some(&5));
+            assert_eq!(engine.stats().node_count, 15);
+            assert_eq!(engine.stats().edge_count, 11);
+        }
+
+        {
+            let engine = GraphEngine::open(&path).unwrap();
+            let stats = engine.stats();
+
+            assert_eq!(stats.node_count, 15);
+            assert_eq!(stats.edge_count, 11);
+            assert_eq!(stats.label_counts.get(&person_label), Some(&10));
+            assert_eq!(stats.label_counts.get(&city_label), Some(&5));
+
+            let knows_type = stats
+                .rel_type_counts
+                .values()
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(knows_type.contains(&8));
+            assert!(knows_type.contains(&3));
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_label_index_roots_populated() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..20 {
+            engine.create_node("Person").unwrap();
+        }
+        for _ in 0..10 {
+            engine.create_node("City").unwrap();
+        }
+
+        let roots = engine.label_index_roots();
+        assert!(!roots.is_empty());
+
+        let person_label = engine.get_node(0).unwrap().label_token_id;
+        let city_label = engine.get_node(20).unwrap().label_token_id;
+        assert!(roots.contains_key(&person_label));
+        assert!(roots.contains_key(&city_label));
+
+        let names = engine.label_name_to_id();
+        assert!(names.contains_key("Person"));
+        assert!(names.contains_key("City"));
+
+        let explain = engine
+            .explain("MATCH (p:Person) RETURN p")
+            .unwrap();
+        assert!(explain.contains("IndexedNodeScan"));
+
+        let result = engine
+            .query("MATCH (p:Person) RETURN p")
+            .unwrap();
+        assert_eq!(result.rows.len(), 20);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_label_index_roots_persist() {
+        let path = temp_path();
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            for _ in 0..20 {
+                engine.create_node("Person").unwrap();
+            }
+            let roots = engine.label_index_roots();
+            assert!(!roots.is_empty());
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            let roots = engine.label_index_roots();
+            assert!(!roots.is_empty());
+
+            let result = engine.query("MATCH (p:Person) RETURN p").unwrap();
+            assert_eq!(result.rows.len(), 20);
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_large_scale_integration() {
+        let path = temp_path();
+
+        let labels = ["Person", "City", "Company"];
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+            for i in 0..30u64 {
+                let label = labels[(i % 3) as usize];
+                engine.create_node(label).unwrap();
+            }
+
+            for i in 0..100u64 {
+                let src = i % 30;
+                let dst = (i * 7 + 3) % 30;
+                if src == dst {
+                    continue;
+                }
+                let rel_type = if i % 2 == 0 { "KNOWS" } else { "LIVES_IN" };
+                engine.create_relationship(src, dst, rel_type).unwrap();
+            }
+
+            let neighbors = engine.get_neighbors(0, Direction::Outgoing).unwrap();
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(0u64);
+            let mut frontier: Vec<u64> = neighbors.iter().map(|(id, _)| *id).collect();
+            for hop in 0..2 {
+                let mut next_frontier = Vec::new();
+                for &nid in &frontier {
+                    if visited.insert(nid) {
+                        let hop_neighbors =
+                            engine.get_neighbors(nid, Direction::Outgoing).unwrap();
+                        for (next_id, _) in hop_neighbors {
+                            next_frontier.push(next_id);
+                        }
+                    }
+                }
+                frontier = next_frontier;
+                if hop == 1 {
+                    assert!(!frontier.is_empty());
+                }
+            }
+
+            let report = crate::integrity::check_integrity(&mut engine).unwrap();
+            let non_count_errors: Vec<_> = report
+                .errors
+                .iter()
+                .filter(|e| {
+                    !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. })
+                })
+                .collect();
+            assert!(
+                non_count_errors.is_empty(),
+                "non-count errors: {:?}",
+                non_count_errors
+            );
+
+            let nc = engine.node_count();
+            let ec = engine.edge_count();
+            assert_eq!(nc, 30);
+            assert!(ec > 50);
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            assert_eq!(engine.node_count(), 30);
+            assert!(engine.edge_count() > 50);
+
+            let report = crate::integrity::check_integrity(&mut engine).unwrap();
+            let non_count_errors: Vec<_> = report
+                .errors
+                .iter()
+                .filter(|e| {
+                    !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. })
+                })
+                .collect();
+            assert!(
+                non_count_errors.is_empty(),
+                "non-count errors after reopen: {:?}",
+                non_count_errors
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -810,9 +810,13 @@ fn exec_create_rel<P: Pager>(
             _ => continue,
         };
 
-        let _rel_id = engine.create_relationship(from_id, to_id, rel_type)?;
+        let rel_id = engine.create_relationship(from_id, to_id, rel_type)?;
         stats.relationships_created += 1;
-        let _ = properties;
+        for (key, val) in properties {
+            let pv = Value::from_literal(val).to_property();
+            engine.set_rel_property(rel_id, key, pv)?;
+            stats.properties_set += 1;
+        }
     }
     Ok(())
 }
