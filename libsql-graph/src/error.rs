@@ -11,6 +11,12 @@ pub enum GraphError {
     TransactionActive,
     InvalidMagic,
     UnsupportedVersion(u32),
+    QueryParse(String),
+    QueryPlan(String),
+    QueryExec(String),
+    NodeNotFound(u64),
+    RelNotFound(u64),
+    ConstraintViolation(String),
 }
 
 impl fmt::Display for GraphError {
@@ -24,6 +30,12 @@ impl fmt::Display for GraphError {
             Self::TransactionActive => write!(f, "Transaction already active"),
             Self::InvalidMagic => write!(f, "Invalid graph file magic bytes"),
             Self::UnsupportedVersion(v) => write!(f, "Unsupported format version: {v}"),
+            Self::QueryParse(msg) => write!(f, "Query parse error: {msg}"),
+            Self::QueryPlan(msg) => write!(f, "Query plan error: {msg}"),
+            Self::QueryExec(msg) => write!(f, "Query execution error: {msg}"),
+            Self::NodeNotFound(id) => write!(f, "Node not found: {id}"),
+            Self::RelNotFound(id) => write!(f, "Relationship not found: {id}"),
+            Self::ConstraintViolation(msg) => write!(f, "Constraint violation: {msg}"),
         }
     }
 }

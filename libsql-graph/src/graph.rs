@@ -250,10 +250,8 @@ impl GraphEngine {
     }
 
     pub fn query(&mut self, cypher: &str) -> Result<QueryResult, GraphError> {
-        let stmt = parser::parse(cypher)
-            .map_err(|e| GraphError::PagerError(format!("parse error: {e}")))?;
-        let plan = planner::plan(&stmt)
-            .map_err(|e| GraphError::PagerError(format!("plan error: {e}")))?;
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
         executor::execute(self, &plan, &HashMap::new())
     }
 
@@ -262,18 +260,14 @@ impl GraphEngine {
         cypher: &str,
         params: HashMap<String, Value>,
     ) -> Result<QueryResult, GraphError> {
-        let stmt = parser::parse(cypher)
-            .map_err(|e| GraphError::PagerError(format!("parse error: {e}")))?;
-        let plan = planner::plan(&stmt)
-            .map_err(|e| GraphError::PagerError(format!("plan error: {e}")))?;
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
         executor::execute(self, &plan, &params)
     }
 
     pub fn explain(&self, cypher: &str) -> Result<String, GraphError> {
-        let stmt = parser::parse(cypher)
-            .map_err(|e| GraphError::PagerError(format!("parse error: {e}")))?;
-        let plan = planner::plan(&stmt)
-            .map_err(|e| GraphError::PagerError(format!("plan error: {e}")))?;
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
         Ok(explain::explain(&plan))
     }
 
