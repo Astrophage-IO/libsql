@@ -2976,6 +2976,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libsql-graph-bolt"
+version = "0.9.30"
+dependencies = [
+ "bytes",
+ "libsql-graph",
+ "tokio",
+]
+
+[[package]]
 name = "libsql-hrana"
 version = "0.9.30"
 dependencies = [
