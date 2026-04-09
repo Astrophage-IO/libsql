@@ -1,14 +1,11 @@
-// TODO: Replace this pure-Rust file-based pager with the real sqlite3Pager FFI
-// once pager symbols are exposed in libsql-ffi. The public API is designed to
-// match the eventual FFI wrapper 1:1.
-
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use crate::error::GraphError;
 use crate::storage::pager::Pager;
+use crate::storage::wal::{self, WalIndex, WalReader, WalWriter};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxState {
@@ -22,13 +19,17 @@ pub struct FilePager {
     db_size: u32,
     tx_state: TxState,
     dirty_pages: HashMap<u32, Vec<u8>>,
-    original_pages: HashMap<u32, Vec<u8>>,
+    wal_writer: Option<WalWriter>,
+    wal_index: WalIndex,
+    wal_path: String,
+    checkpoint_threshold: u32,
+    pre_tx_db_size: u32,
 }
 
 impl FilePager {
     pub fn open(path: &str, page_size: u32) -> Result<Self, GraphError> {
         let p = Path::new(path);
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -37,11 +38,23 @@ impl FilePager {
 
         let file_len = file.metadata()?.len();
         let ps = page_size as usize;
-        let db_size = if file_len == 0 {
+        let mut db_size = if file_len == 0 {
             0
         } else {
             (file_len / ps as u64) as u32
         };
+
+        let wal_path = format!("{path}-wal");
+
+        if let Some(mut reader) = WalReader::open(&wal_path)? {
+            let replayed = reader.checkpoint(&mut file)?;
+            if replayed > 0 {
+                let new_len = file.metadata()?.len();
+                db_size = (new_len / ps as u64) as u32;
+            }
+            drop(reader);
+            let _ = std::fs::remove_file(&wal_path);
+        }
 
         Ok(Self {
             file,
@@ -49,7 +62,11 @@ impl FilePager {
             db_size,
             tx_state: TxState::None,
             dirty_pages: HashMap::new(),
-            original_pages: HashMap::new(),
+            wal_writer: None,
+            wal_index: WalIndex::new(),
+            wal_path,
+            checkpoint_threshold: 1000,
+            pre_tx_db_size: db_size,
         })
     }
 
@@ -57,9 +74,39 @@ impl FilePager {
         if self.tx_state == TxState::Write {
             self.rollback()?;
         }
+        self.checkpoint()?;
+        if self.wal_writer.take().is_some() {
+            let _ = std::fs::remove_file(&self.wal_path);
+        }
         self.tx_state = TxState::None;
         self.file.sync_all()?;
         Ok(())
+    }
+
+    pub fn checkpoint(&mut self) -> Result<(), GraphError> {
+        if self.wal_writer.is_none() {
+            return Ok(());
+        }
+
+        {
+            let mut reader = match WalReader::open(&self.wal_path)? {
+                Some(r) => r,
+                None => return Ok(()),
+            };
+            reader.checkpoint(&mut self.file)?;
+        }
+
+        if let Some(ref mut writer) = self.wal_writer {
+            writer.reset(self.page_size as u32)?;
+        }
+
+        self.wal_index.clear();
+
+        Ok(())
+    }
+
+    pub fn set_checkpoint_threshold(&mut self, threshold: u32) {
+        self.checkpoint_threshold = threshold;
     }
 }
 
@@ -83,6 +130,17 @@ impl Pager for FilePager {
                 pgno,
                 page_size: self.page_size,
             });
+        }
+
+        if let Some(offset) = self.wal_index.get(pgno) {
+            if let Some(ref mut writer) = self.wal_writer {
+                let data = wal::read_frame_data_at(writer.file_mut(), offset, self.page_size)?;
+                return Ok(PageHandle {
+                    data,
+                    pgno,
+                    page_size: self.page_size,
+                });
+            }
         }
 
         let offset = (pgno as u64 - 1) * self.page_size as u64;
@@ -123,19 +181,6 @@ impl Pager for FilePager {
             return Err(GraphError::NoTransaction);
         }
 
-        if let std::collections::hash_map::Entry::Vacant(e) =
-            self.original_pages.entry(handle.pgno)
-        {
-            let file_len = self.file.metadata()?.len();
-            let offset = (handle.pgno as u64 - 1) * self.page_size as u64;
-            if offset < file_len {
-                self.file.seek(SeekFrom::Start(offset))?;
-                let mut orig = vec![0u8; self.page_size];
-                let _ = self.file.read(&mut orig);
-                e.insert(orig);
-            }
-        }
-
         self.dirty_pages.insert(handle.pgno, handle.data.clone());
         Ok(())
     }
@@ -149,8 +194,8 @@ impl Pager for FilePager {
             return Err(GraphError::TransactionActive);
         }
         self.tx_state = TxState::Write;
+        self.pre_tx_db_size = self.db_size;
         self.dirty_pages.clear();
-        self.original_pages.clear();
         Ok(())
     }
 
@@ -162,14 +207,34 @@ impl Pager for FilePager {
         let mut pages: Vec<(u32, Vec<u8>)> = self.dirty_pages.drain().collect();
         pages.sort_by_key(|(pgno, _)| *pgno);
 
-        for (pgno, data) in &pages {
-            let offset = (*pgno as u64 - 1) * self.page_size as u64;
-            self.file.seek(SeekFrom::Start(offset))?;
-            self.file.write_all(data)?;
+        if pages.is_empty() {
+            self.tx_state = TxState::None;
+            return Ok(());
         }
-        self.file.sync_all()?;
 
-        self.original_pages.clear();
+        if self.wal_writer.is_none() {
+            self.wal_writer = Some(WalWriter::create(&self.wal_path, self.page_size as u32)?);
+        }
+
+        let writer = self.wal_writer.as_mut().unwrap();
+        let total = pages.len();
+
+        for (idx, (pgno, data)) in pages.iter().enumerate() {
+            let is_commit = idx == total - 1;
+            let frame_offset = wal::wal_header_size() as u64
+                + writer.frame_count() as u64
+                    * (wal::frame_header_size() as u64 + self.page_size as u64);
+
+            writer.append_frame(*pgno, data, is_commit, if is_commit { self.db_size } else { 0 })?;
+            self.wal_index.insert(*pgno, frame_offset);
+        }
+
+        writer.sync()?;
+
+        if writer.frame_count() >= self.checkpoint_threshold {
+            self.checkpoint()?;
+        }
+
         self.tx_state = TxState::None;
         Ok(())
     }
@@ -179,15 +244,8 @@ impl Pager for FilePager {
             return Err(GraphError::NoTransaction);
         }
 
-        let alloc_count = self
-            .dirty_pages
-            .keys()
-            .filter(|pgno| !self.original_pages.contains_key(pgno))
-            .count() as u32;
-
-        self.db_size = self.db_size.saturating_sub(alloc_count);
+        self.db_size = self.pre_tx_db_size;
         self.dirty_pages.clear();
-        self.original_pages.clear();
         self.tx_state = TxState::None;
         Ok(())
     }
@@ -390,5 +448,156 @@ mod tests {
 
         drop(pager);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_wal_aware_reads() {
+        let path = temp_path();
+        let mut pager = FilePager::open(&path, 4096).unwrap();
+
+        pager.begin_write().unwrap();
+        let (pgno, mut handle) = pager.alloc_page().unwrap();
+        handle.data_mut().unwrap()[0] = 0xDE;
+        handle.data_mut().unwrap()[1] = 0xAD;
+        pager.write_page(&handle).unwrap();
+        pager.commit().unwrap();
+
+        let wal_path = format!("{path}-wal");
+        assert!(std::path::Path::new(&wal_path).exists());
+
+        pager.begin_write().unwrap();
+        let h = pager.get_page(pgno).unwrap();
+        assert_eq!(h.data()[0], 0xDE);
+        assert_eq!(h.data()[1], 0xAD);
+        pager.commit().unwrap();
+
+        pager.begin_write().unwrap();
+        let mut h2 = pager.get_page(pgno).unwrap();
+        h2.data_mut().unwrap()[0] = 0xBE;
+        h2.data_mut().unwrap()[1] = 0xEF;
+        pager.write_page(&h2).unwrap();
+        pager.commit().unwrap();
+
+        let h3 = pager.get_page(pgno).unwrap();
+        assert_eq!(h3.data()[0], 0xBE);
+        assert_eq!(h3.data()[1], 0xEF);
+
+        drop(pager);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal_path);
+    }
+
+    #[test]
+    fn test_auto_checkpoint() {
+        let path = temp_path();
+        let wal_path = format!("{path}-wal");
+        let mut pager = FilePager::open(&path, 4096).unwrap();
+        pager.set_checkpoint_threshold(5);
+
+        for i in 0u32..6 {
+            pager.begin_write().unwrap();
+            let (_pgno, mut handle) = pager.alloc_page().unwrap();
+            handle.data_mut().unwrap()[0..4].copy_from_slice(&(i + 1).to_le_bytes());
+            pager.write_page(&handle).unwrap();
+            pager.commit().unwrap();
+        }
+
+        let db_file_len = std::fs::metadata(&path).unwrap().len();
+        assert!(db_file_len >= 5 * 4096);
+
+        for pgno in 1..=6u32 {
+            let h = pager.get_page(pgno).unwrap();
+            let tag = u32::from_le_bytes(h.data()[0..4].try_into().unwrap());
+            assert_eq!(tag, pgno);
+        }
+
+        drop(pager);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal_path);
+    }
+
+    #[test]
+    fn test_clean_open_no_wal() {
+        let path = temp_path();
+        let wal_path = format!("{path}-wal");
+
+        assert!(!std::path::Path::new(&wal_path).exists());
+
+        let mut pager = FilePager::open(&path, 4096).unwrap();
+        assert_eq!(pager.db_size(), 0);
+
+        pager.begin_write().unwrap();
+        let (_pgno, mut handle) = pager.alloc_page().unwrap();
+        handle.data_mut().unwrap()[0] = 0x42;
+        pager.write_page(&handle).unwrap();
+        pager.commit().unwrap();
+
+        assert_eq!(pager.db_size(), 1);
+        let h = pager.get_page(1).unwrap();
+        assert_eq!(h.data()[0], 0x42);
+
+        drop(pager);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal_path);
+    }
+
+    #[test]
+    fn test_wal_end_to_end_with_corruption() {
+        use crate::graph::GraphEngine;
+        use std::io::Write;
+
+        let path = temp_path();
+        let wal_path = format!("{path}-wal");
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            engine.create_node("Person").unwrap();
+            engine.create_node("Company").unwrap();
+            engine
+                .set_node_property(0, "name", crate::storage::property_store::PropertyValue::ShortString("Alice".into()))
+                .unwrap();
+            engine.create_relationship(0, 1, "WORKS_AT").unwrap();
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            assert_eq!(engine.node_count(), 2);
+            assert_eq!(engine.edge_count(), 1);
+            let name = engine.get_node_property(0, "name").unwrap();
+            assert_eq!(
+                name,
+                Some(crate::storage::property_store::PropertyValue::ShortString("Alice".into()))
+            );
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(2, "name", crate::storage::property_store::PropertyValue::ShortString("Bob".into()))
+                .unwrap();
+        }
+
+        if std::path::Path::new(&wal_path).exists() {
+            let _ = std::fs::remove_file(&wal_path);
+        }
+
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(false)
+                .open(&wal_path)
+                .unwrap();
+            f.write_all(&[0xFF; 50]).unwrap();
+        }
+
+        {
+            let engine = GraphEngine::open(&path).unwrap();
+            assert!(engine.node_count() >= 2);
+        }
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&wal_path);
     }
 }

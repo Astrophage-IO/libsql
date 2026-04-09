@@ -13,3 +13,4 @@ pub mod record;
 pub mod rel_store;
 pub mod string_overflow;
 pub mod token_store;
+pub mod wal;
