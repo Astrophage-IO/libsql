@@ -43,6 +43,7 @@ impl Parser {
             Token::Create => self.parse_create(),
             Token::Delete | Token::Detach => self.parse_delete_stmt(),
             Token::Merge => self.parse_merge(),
+            Token::Unwind => self.parse_unwind(),
             _ => Err(format!("expected MATCH, CREATE, DELETE, or MERGE, got {:?}", self.peek())),
         }
     }
@@ -654,6 +655,31 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
+            Token::LBracket => {
+                self.advance();
+                let mut items = Vec::new();
+                if *self.peek() != Token::RBracket {
+                    items.push(self.parse_expr()?);
+                    while *self.peek() == Token::Comma {
+                        self.advance();
+                        items.push(self.parse_expr()?);
+                    }
+                }
+                // Handle ] or ]- (RBracketDash)
+                if *self.peek() == Token::RBracketDash {
+                    return Err("unexpected ]- in list literal".into());
+                }
+                self.expect(&Token::RBracket)?;
+                Ok(Expr::Literal(Literal::List(
+                    items
+                        .into_iter()
+                        .map(|e| match e {
+                            Expr::Literal(lit) => lit,
+                            _ => Literal::Null,
+                        })
+                        .collect(),
+                )))
+            }
             Token::Case => {
                 self.advance();
                 let operand = if *self.peek() != Token::When {
@@ -684,6 +710,23 @@ impl Parser {
             }
             tok => Err(format!("unexpected token in expression: {:?}", tok)),
         }
+    }
+
+    fn parse_unwind(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Unwind)?;
+        let expr = self.parse_expr()?;
+        self.expect(&Token::As)?;
+        let variable = self.expect_ident()?;
+        let return_clause = if *self.peek() == Token::Return {
+            Some(self.parse_return()?)
+        } else {
+            None
+        };
+        Ok(Statement::Unwind(UnwindStatement {
+            expr,
+            variable,
+            return_clause,
+        }))
     }
 
     fn parse_merge(&mut self) -> Result<Statement, String> {

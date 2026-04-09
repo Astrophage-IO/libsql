@@ -14,6 +14,7 @@ pub enum Value {
     Float(f64),
     String(String),
     Node(u64),
+    Rel(u64),
     List(Vec<Value>),
 }
 
@@ -26,6 +27,7 @@ impl std::fmt::Display for Value {
             Self::Float(n) => write!(f, "{n}"),
             Self::String(s) => write!(f, "{s}"),
             Self::Node(id) => write!(f, "Node({id})"),
+            Self::Rel(id) => write!(f, "Rel({id})"),
             Self::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -64,7 +66,7 @@ impl Value {
             }
             Self::Float(f) => PropertyValue::Float64(*f),
             Self::String(s) => PropertyValue::ShortString(s.clone()),
-            Self::Node(_) | Self::List(_) => PropertyValue::Null,
+            Self::Node(_) | Self::Rel(_) | Self::List(_) => PropertyValue::Null,
         }
     }
 
@@ -75,6 +77,7 @@ impl Value {
             Literal::String(s) => Self::String(s.clone()),
             Literal::Bool(b) => Self::Bool(*b),
             Literal::Null => Self::Null,
+            Literal::List(items) => Self::List(items.iter().map(Self::from_literal).collect()),
         }
     }
 
@@ -85,7 +88,7 @@ impl Value {
             Self::Integer(n) => *n != 0,
             Self::Float(f) => *f != 0.0,
             Self::String(s) => !s.is_empty(),
-            Self::Node(_) => true,
+            Self::Node(_) | Self::Rel(_) => true,
             Self::List(items) => !items.is_empty(),
         }
     }
@@ -128,13 +131,14 @@ pub fn execute(
                 variable,
                 label,
                 properties,
+                optional: _,
             } => {
                 binding_table =
                     exec_node_scan(engine, &binding_table, variable, label, properties)?;
             }
             PlanStep::Expand {
                 from_var,
-                rel_var: _,
+                rel_var,
                 to_var,
                 rel_type,
                 direction,
@@ -158,6 +162,7 @@ pub fn execute(
                         &binding_table,
                         from_var,
                         to_var,
+                        rel_var.as_deref(),
                         rel_type.as_deref(),
                         *direction,
                     )?;
@@ -210,6 +215,20 @@ pub fn execute(
                     params,
                     &mut stats,
                 )?;
+            }
+            PlanStep::Unwind { expr, variable } => {
+                let mut new_table = Vec::new();
+                for bindings in &binding_table {
+                    let val = eval_expr(engine, expr, bindings, params);
+                    if let Value::List(items) = val {
+                        for item in items {
+                            let mut new_bindings = bindings.clone();
+                            new_bindings.insert(variable.clone(), item);
+                            new_table.push(new_bindings);
+                        }
+                    }
+                }
+                binding_table = new_table;
             }
             PlanStep::Distinct => {}
             PlanStep::With { items, where_clause } => {
@@ -413,6 +432,7 @@ fn exec_expand(
     current: &[Bindings],
     from_var: &str,
     to_var: &str,
+    rel_var: Option<&str>,
     rel_type: Option<&str>,
     direction: Direction,
 ) -> Result<Vec<Bindings>, GraphError> {
@@ -455,6 +475,19 @@ fn exec_expand(
             let mut new_bindings = bindings.clone();
             if !to_var.is_empty() {
                 new_bindings.insert(to_var.to_string(), Value::Node(neighbor_id));
+            }
+            if let Some(rv) = rel_var {
+                if !rv.is_empty() {
+                    let store_root = engine.db().header().rel_store_root;
+                    let ps = engine.db().page_size() as usize;
+                    let rpp = crate::storage::record::records_per_page(
+                        ps,
+                        crate::storage::record::REL_RECORD_SIZE,
+                        crate::storage::page::PAGE_HEADER_SIZE,
+                    ) as u64;
+                    let rel_id = (rel_addr.page - store_root) as u64 * rpp + rel_addr.slot as u64;
+                    new_bindings.insert(rv.to_string(), Value::Rel(rel_id));
+                }
             }
             results.push(new_bindings);
         }
@@ -703,17 +736,20 @@ fn eval_expr(
                 .map(|e| eval_expr(engine, e, bindings, params))
                 .unwrap_or(Value::Null)
         }
-        Expr::Property(var, prop) => {
-            let node_id = match bindings.get(var) {
-                Some(Value::Node(id)) => *id,
-                _ => return Value::Null,
-            };
-            engine
-                .get_node_property(node_id, prop)
+        Expr::Property(var, prop) => match bindings.get(var) {
+            Some(Value::Node(id)) => engine
+                .get_node_property(*id, prop)
                 .ok()
                 .flatten()
                 .map(|pv| Value::from_property(&pv))
-                .unwrap_or(Value::Null)
+                .unwrap_or(Value::Null),
+            Some(Value::Rel(id)) => engine
+                .get_rel_property(*id, prop)
+                .ok()
+                .flatten()
+                .map(|pv| Value::from_property(&pv))
+                .unwrap_or(Value::Null),
+            _ => Value::Null,
         }
         Expr::FunctionCall(name, args) => {
             match name.to_lowercase().as_str() {
@@ -740,7 +776,7 @@ fn eval_expr(
                         _ => Value::Null,
                     }
                 }
-                "type" => {
+                "typeof" => {
                     let val = eval_expr(engine, &args[0], bindings, params);
                     let type_name = match val {
                         Value::Null => "NULL",
@@ -749,6 +785,7 @@ fn eval_expr(
                         Value::Float(_) => "FLOAT",
                         Value::String(_) => "STRING",
                         Value::Node(_) => "NODE",
+                        Value::Rel(_) => "RELATIONSHIP",
                         Value::List(_) => "LIST",
                     };
                     Value::String(type_name.to_string())
@@ -756,8 +793,21 @@ fn eval_expr(
                 "id" => {
                     let val = eval_expr(engine, &args[0], bindings, params);
                     match val {
-                        Value::Node(id) => Value::Integer(id as i64),
+                        Value::Node(id) | Value::Rel(id) => Value::Integer(id as i64),
                         _ => Value::Null,
+                    }
+                }
+                "type" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    if let Value::Rel(rel_id) = val {
+                        engine
+                            .get_rel(rel_id)
+                            .ok()
+                            .and_then(|rel| engine.get_rel_type_name(rel.type_token_id).ok())
+                            .map(Value::String)
+                            .unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
                     }
                 }
                 "labels" => {
@@ -1745,6 +1795,102 @@ mod tests {
         let keys = engine.property_keys().unwrap();
         assert!(keys.contains(&"name".to_string()));
         assert!(keys.contains(&"age".to_string()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_rel_variable_binding() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, type(r), b.name",
+        );
+        assert_eq!(result.rows.len(), 2);
+        for row in &result.rows {
+            assert_eq!(row[1], Value::String("KNOWS".into()));
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_rel_property_via_cypher() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        engine
+            .set_rel_property(0, "since", PropertyValue::Int32(2020))
+            .unwrap();
+
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE r.since = 2020 RETURN a.name, b.name",
+        );
+        assert_eq!(result.rows.len(), 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_rel_id_function() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person)-[r:KNOWS]->(b) RETURN id(r)",
+        );
+        assert_eq!(result.rows.len(), 2);
+        for row in &result.rows {
+            assert!(matches!(row[0], Value::Integer(_)));
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_unwind_list() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let result = engine.query("UNWIND [1, 2, 3] AS x RETURN x").unwrap();
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(result.rows[0][0], Value::Integer(1));
+        assert_eq!(result.rows[1][0], Value::Integer(2));
+        assert_eq!(result.rows[2][0], Value::Integer(3));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optional_match_parse() {
+        let stmt = crate::cypher::parser::parse(
+            "OPTIONAL MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name, b.name",
+        );
+        assert!(stmt.is_ok());
+        if let Ok(crate::cypher::ast::Statement::Match(m)) = stmt {
+            assert!(m.optional);
+        } else {
+            panic!("expected optional match");
+        }
+    }
+
+    #[test]
+    fn test_chained_match() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' MATCH (b:Person) WHERE b.name = 'Bob' RETURN a.name, b.name",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+        assert_eq!(result.rows[0][1], Value::String("Bob".into()));
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

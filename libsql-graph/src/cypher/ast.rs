@@ -4,6 +4,14 @@ pub enum Statement {
     Create(CreateStatement),
     Delete(DeleteStatement),
     Merge(MergeStatement),
+    Unwind(UnwindStatement),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnwindStatement {
+    pub expr: Expr,
+    pub variable: String,
+    pub return_clause: Option<ReturnClause>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +158,7 @@ pub enum Literal {
     String(String),
     Bool(bool),
     Null,
+    List(Vec<Literal>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

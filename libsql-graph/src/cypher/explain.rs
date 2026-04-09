@@ -39,7 +39,9 @@ pub struct ExplainRow {
 
 fn operation_name(step: &PlanStep) -> String {
     match step {
-        PlanStep::NodeScan { .. } => "NodeScan".into(),
+        PlanStep::NodeScan { optional, .. } => {
+            if *optional { "OptionalNodeScan".into() } else { "NodeScan".into() }
+        }
         PlanStep::Expand { .. } => "Expand".into(),
         PlanStep::Filter { .. } => "Filter".into(),
         PlanStep::CreateNode { .. } => "CreateNode".into(),
@@ -52,6 +54,7 @@ fn operation_name(step: &PlanStep) -> String {
         PlanStep::Distinct => "Distinct".into(),
         PlanStep::With { .. } => "With".into(),
         PlanStep::Merge { .. } => "Merge".into(),
+        PlanStep::Unwind { .. } => "Unwind".into(),
     }
 }
 
@@ -61,7 +64,9 @@ fn format_step(step: &PlanStep) -> String {
             variable,
             label,
             properties,
+            optional,
         } => {
+            let opt_prefix = if *optional { "Optional" } else { "" };
             let label_str = label
                 .as_deref()
                 .map(|l| format!(":{l}"))
@@ -75,7 +80,7 @@ fn format_step(step: &PlanStep) -> String {
                     .collect();
                 format!(" {{{}}}", kv.join(", "))
             };
-            format!("NodeScan({variable}{label_str}{props_str})")
+            format!("{opt_prefix}NodeScan({variable}{label_str}{props_str})")
         }
         PlanStep::Expand {
             from_var,
@@ -176,6 +181,7 @@ fn format_step(step: &PlanStep) -> String {
             let cols: Vec<String> = items.iter().map(|i| format_expr(&i.expr)).collect();
             format!("With({})", cols.join(", "))
         }
+        PlanStep::Unwind { variable, .. } => format!("Unwind AS {variable}"),
         PlanStep::Merge {
             variable,
             label,
@@ -250,6 +256,7 @@ fn estimate_rows(step: &PlanStep) -> String {
         PlanStep::Limit { count } => format!("{count}"),
         PlanStep::Distinct => "<=input".into(),
         PlanStep::With { .. } => "<=input".into(),
+        PlanStep::Unwind { .. } => "N*list_len".into(),
         _ => "-".into(),
     }
 }

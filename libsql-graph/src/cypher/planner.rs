@@ -12,6 +12,7 @@ pub enum PlanStep {
         variable: String,
         label: Option<String>,
         properties: Vec<(String, Literal)>,
+        optional: bool,
     },
     Expand {
         from_var: String,
@@ -59,6 +60,10 @@ pub enum PlanStep {
         items: Vec<ReturnItem>,
         where_clause: Option<Expr>,
     },
+    Unwind {
+        expr: Expr,
+        variable: String,
+    },
     Merge {
         variable: Option<String>,
         label: Option<String>,
@@ -74,6 +79,7 @@ pub fn plan(stmt: &Statement) -> Result<QueryPlan, String> {
         Statement::Create(c) => plan_create(c),
         Statement::Delete(d) => plan_delete(d),
         Statement::Merge(m) => plan_merge(m),
+        Statement::Unwind(u) => plan_unwind(u),
     }
 }
 
@@ -86,6 +92,7 @@ fn plan_match(m: &MatchStatement) -> Result<QueryPlan, String> {
             variable: node.variable.clone().unwrap_or_default(),
             label: node.label.clone(),
             properties: node.properties.clone(),
+            optional: m.optional,
         });
     } else {
         return Err("pattern must start with a node".into());
@@ -215,6 +222,19 @@ fn plan_create(c: &CreateStatement) -> Result<QueryPlan, String> {
         });
     }
 
+    Ok(QueryPlan { steps })
+}
+
+fn plan_unwind(u: &UnwindStatement) -> Result<QueryPlan, String> {
+    let mut steps = vec![PlanStep::Unwind {
+        expr: u.expr.clone(),
+        variable: u.variable.clone(),
+    }];
+    if let Some(ref ret) = u.return_clause {
+        steps.push(PlanStep::Project {
+            items: ret.items.clone(),
+        });
+    }
     Ok(QueryPlan { steps })
 }
 
