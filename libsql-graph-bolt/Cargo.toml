@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "sync", "time"] }
 bytes = "1"
 libsql-graph = { path = "../libsql-graph" }
 

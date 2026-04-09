@@ -1,34 +1,40 @@
+use std::time::Duration;
+
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 use bytes::{Bytes, BytesMut, BufMut};
 
 use crate::error::BoltError;
 
 const MAX_CHUNK_SIZE: usize = 65535;
+const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn read_exact_with_timeout<R: AsyncRead + Unpin>(reader: &mut R, buf: &mut [u8]) -> Result<(), BoltError> {
+    match tokio::time::timeout(READ_TIMEOUT, reader.read_exact(buf)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            Err(BoltError::ConnectionClosed)
+        }
+        Ok(Err(e)) => Err(BoltError::Io(e)),
+        Err(_) => Err(BoltError::Protocol("read timeout".into())),
+    }
+}
 
 pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Bytes, BoltError> {
     let mut buf = BytesMut::new();
     loop {
         let mut len_bytes = [0u8; 2];
-        match reader.read_exact(&mut len_bytes).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(BoltError::ConnectionClosed);
-            }
-            Err(e) => return Err(BoltError::Io(e)),
-        }
+        read_exact_with_timeout(reader, &mut len_bytes).await?;
         let chunk_len = u16::from_be_bytes(len_bytes) as usize;
         if chunk_len == 0 {
             return Ok(buf.freeze());
         }
         let mut chunk = vec![0u8; chunk_len];
-        match reader.read_exact(&mut chunk).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Err(BoltError::ConnectionClosed);
-            }
-            Err(e) => return Err(BoltError::Io(e)),
-        }
+        read_exact_with_timeout(reader, &mut chunk).await?;
         buf.put_slice(&chunk);
+        if buf.len() > MAX_MESSAGE_SIZE {
+            return Err(BoltError::Protocol("message exceeds 16 MB limit".into()));
+        }
     }
 }
 

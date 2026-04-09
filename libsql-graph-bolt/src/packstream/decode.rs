@@ -3,7 +3,20 @@ use bytes::{Buf, Bytes};
 use super::value::PackValue;
 use crate::error::BoltError;
 
+const MAX_DEPTH: usize = 128;
+const MAX_COLLECTION_SIZE: usize = 1_000_000;
+
 pub fn decode(buf: &mut Bytes) -> Result<PackValue, BoltError> {
+    decode_inner(buf, 0)
+}
+
+fn decode_inner(buf: &mut Bytes, depth: usize) -> Result<PackValue, BoltError> {
+    if depth > MAX_DEPTH {
+        return Err(BoltError::PackStream(format!(
+            "recursion depth {} exceeds maximum of {}", depth, MAX_DEPTH
+        )));
+    }
+
     if !buf.has_remaining() {
         return Err(BoltError::PackStream("unexpected end of data".into()));
     }
@@ -19,34 +32,27 @@ pub fn decode(buf: &mut Bytes) -> Result<PackValue, BoltError> {
             Ok(PackValue::Float(buf.get_f64()))
         }
 
-        // TINY_INT positive: 0x00..=0x7F
         0x00..=0x7F => Ok(PackValue::Int(marker as i64)),
 
-        // TINY_INT negative: 0xF0..=0xFF -> -16..-1
         0xF0..=0xFF => Ok(PackValue::Int(marker as i8 as i64)),
 
-        // INT_8
         0xC8 => {
             ensure_remaining(buf, 1)?;
             Ok(PackValue::Int(buf.get_i8() as i64))
         }
-        // INT_16
         0xC9 => {
             ensure_remaining(buf, 2)?;
             Ok(PackValue::Int(buf.get_i16() as i64))
         }
-        // INT_32
         0xCA => {
             ensure_remaining(buf, 4)?;
             Ok(PackValue::Int(buf.get_i32() as i64))
         }
-        // INT_64
         0xCB => {
             ensure_remaining(buf, 8)?;
             Ok(PackValue::Int(buf.get_i64()))
         }
 
-        // BYTES_8
         0xCC => {
             ensure_remaining(buf, 1)?;
             let len = buf.get_u8() as usize;
@@ -54,7 +60,6 @@ pub fn decode(buf: &mut Bytes) -> Result<PackValue, BoltError> {
             let data = buf.copy_to_bytes(len).to_vec();
             Ok(PackValue::Bytes(data))
         }
-        // BYTES_16
         0xCD => {
             ensure_remaining(buf, 2)?;
             let len = buf.get_u16() as usize;
@@ -62,7 +67,6 @@ pub fn decode(buf: &mut Bytes) -> Result<PackValue, BoltError> {
             let data = buf.copy_to_bytes(len).to_vec();
             Ok(PackValue::Bytes(data))
         }
-        // BYTES_32
         0xCE => {
             ensure_remaining(buf, 4)?;
             let len = buf.get_u32() as usize;
@@ -71,86 +75,74 @@ pub fn decode(buf: &mut Bytes) -> Result<PackValue, BoltError> {
             Ok(PackValue::Bytes(data))
         }
 
-        // TINY_STRING: 0x80..=0x8F
         0x80..=0x8F => {
             let len = (marker & 0x0F) as usize;
             read_string(buf, len)
         }
-        // STRING_8
         0xD0 => {
             ensure_remaining(buf, 1)?;
             let len = buf.get_u8() as usize;
             read_string(buf, len)
         }
-        // STRING_16
         0xD1 => {
             ensure_remaining(buf, 2)?;
             let len = buf.get_u16() as usize;
             read_string(buf, len)
         }
-        // STRING_32
         0xD2 => {
             ensure_remaining(buf, 4)?;
             let len = buf.get_u32() as usize;
             read_string(buf, len)
         }
 
-        // TINY_LIST: 0x90..=0x9F
         0x90..=0x9F => {
             let count = (marker & 0x0F) as usize;
-            read_list(buf, count)
+            read_list(buf, count, depth)
         }
-        // LIST_8
         0xD4 => {
             ensure_remaining(buf, 1)?;
             let count = buf.get_u8() as usize;
-            read_list(buf, count)
+            read_list(buf, count, depth)
         }
-        // LIST_16
         0xD5 => {
             ensure_remaining(buf, 2)?;
             let count = buf.get_u16() as usize;
-            read_list(buf, count)
+            read_list(buf, count, depth)
         }
-        // LIST_32
         0xD6 => {
             ensure_remaining(buf, 4)?;
             let count = buf.get_u32() as usize;
-            read_list(buf, count)
+            read_list(buf, count, depth)
         }
 
-        // TINY_MAP: 0xA0..=0xAF
         0xA0..=0xAF => {
             let count = (marker & 0x0F) as usize;
-            read_map(buf, count)
+            read_map(buf, count, depth)
         }
-        // MAP_8
         0xD8 => {
             ensure_remaining(buf, 1)?;
             let count = buf.get_u8() as usize;
-            read_map(buf, count)
+            read_map(buf, count, depth)
         }
-        // MAP_16
         0xD9 => {
             ensure_remaining(buf, 2)?;
             let count = buf.get_u16() as usize;
-            read_map(buf, count)
+            read_map(buf, count, depth)
         }
-        // MAP_32
         0xDA => {
             ensure_remaining(buf, 4)?;
             let count = buf.get_u32() as usize;
-            read_map(buf, count)
+            read_map(buf, count, depth)
         }
 
-        // TINY_STRUCT: 0xB0..=0xBF
         0xB0..=0xBF => {
             let field_count = (marker & 0x0F) as usize;
             ensure_remaining(buf, 1)?;
             let tag = buf.get_u8();
+            validate_collection_size(field_count, 1, buf)?;
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
-                fields.push(decode(buf)?);
+                fields.push(decode_inner(buf, depth + 1)?);
             }
             Ok(PackValue::Struct { tag, fields })
         }
@@ -178,22 +170,39 @@ fn read_string(buf: &mut Bytes, len: usize) -> Result<PackValue, BoltError> {
     Ok(PackValue::String(s))
 }
 
-fn read_list(buf: &mut Bytes, count: usize) -> Result<PackValue, BoltError> {
+fn validate_collection_size(count: usize, bytes_per_item: usize, buf: &Bytes) -> Result<(), BoltError> {
+    if count > MAX_COLLECTION_SIZE {
+        return Err(BoltError::PackStream(format!(
+            "collection size {} exceeds maximum of {}", count, MAX_COLLECTION_SIZE
+        )));
+    }
+    let min_bytes = count.saturating_mul(bytes_per_item);
+    if min_bytes > buf.remaining() {
+        return Err(BoltError::PackStream(format!(
+            "collection claims {} items but only {} bytes remain", count, buf.remaining()
+        )));
+    }
+    Ok(())
+}
+
+fn read_list(buf: &mut Bytes, count: usize, depth: usize) -> Result<PackValue, BoltError> {
+    validate_collection_size(count, 1, buf)?;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
-        items.push(decode(buf)?);
+        items.push(decode_inner(buf, depth + 1)?);
     }
     Ok(PackValue::List(items))
 }
 
-fn read_map(buf: &mut Bytes, count: usize) -> Result<PackValue, BoltError> {
+fn read_map(buf: &mut Bytes, count: usize, depth: usize) -> Result<PackValue, BoltError> {
+    validate_collection_size(count, 2, buf)?;
     let mut entries = Vec::with_capacity(count);
     for _ in 0..count {
-        let key = match decode(buf)? {
+        let key = match decode_inner(buf, depth + 1)? {
             PackValue::String(s) => s,
             other => return Err(BoltError::PackStream(format!("map key must be string, got {:?}", other))),
         };
-        let val = decode(buf)?;
+        let val = decode_inner(buf, depth + 1)?;
         entries.push((key, val));
     }
     Ok(PackValue::Map(entries))
@@ -426,5 +435,45 @@ mod tests {
             assert_eq!(decode(&mut dec).unwrap(), *v);
         }
         assert!(!dec.has_remaining());
+    }
+
+    #[test]
+    fn test_decode_list_claims_more_items_than_bytes() {
+        let mut raw = vec![0xD4, 200];
+        raw.push(0x01);
+        let mut buf = Bytes::from(raw);
+        let err = decode(&mut buf).unwrap_err();
+        match err {
+            BoltError::PackStream(msg) => assert!(msg.contains("claims"), "{}", msg),
+            other => panic!("expected PackStream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_map_claims_more_items_than_bytes() {
+        let mut raw = vec![0xD8, 100];
+        raw.push(0x80);
+        raw.push(0x01);
+        let mut buf = Bytes::from(raw);
+        let err = decode(&mut buf).unwrap_err();
+        match err {
+            BoltError::PackStream(msg) => assert!(msg.contains("claims"), "{}", msg),
+            other => panic!("expected PackStream error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decode_deeply_nested_exceeds_max_depth() {
+        let mut raw = Vec::new();
+        for _ in 0..200 {
+            raw.push(0x91);
+        }
+        raw.push(0xC0);
+        let mut buf = Bytes::from(raw);
+        let err = decode(&mut buf).unwrap_err();
+        match err {
+            BoltError::PackStream(msg) => assert!(msg.contains("recursion depth"), "{}", msg),
+            other => panic!("expected PackStream error, got {:?}", other),
+        }
     }
 }

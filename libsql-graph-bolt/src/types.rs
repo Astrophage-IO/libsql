@@ -68,7 +68,7 @@ pub fn graph_error_to_bolt(err: &GraphError) -> (String, String) {
             msg.clone(),
         ),
         GraphError::QueryExec(msg) => (
-            "Neo.ClientError.Statement.SyntaxError".into(),
+            "Neo.ClientError.Statement.ExecutionFailed".into(),
             msg.clone(),
         ),
         GraphError::NodeNotFound(id) => (

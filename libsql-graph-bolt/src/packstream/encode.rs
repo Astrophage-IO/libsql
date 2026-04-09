@@ -23,6 +23,11 @@ pub fn encode(value: &PackValue, buf: &mut BytesMut) {
 
         PackValue::Struct { tag, fields } => {
             let count = fields.len();
+            assert!(
+                count <= 15,
+                "PackStream structs support at most 15 fields, got {}",
+                count
+            );
             buf.put_u8(0xB0 | (count as u8));
             buf.put_u8(*tag);
             for field in fields {
@@ -482,5 +487,14 @@ mod tests {
         for v in &values {
             assert_eq!(round_trip(v), *v, "round-trip failed for {:?}", v);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "PackStream structs support at most 15 fields")]
+    fn test_encode_struct_16_fields_panics() {
+        let fields: Vec<PackValue> = (0..16).map(|i| PackValue::Int(i)).collect();
+        let v = PackValue::Struct { tag: 0x01, fields };
+        let mut buf = BytesMut::new();
+        encode(&v, &mut buf);
     }
 }

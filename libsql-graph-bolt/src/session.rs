@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -18,11 +17,20 @@ use crate::types;
 
 pub struct Session {
     state: BoltState,
-    engine: Arc<Mutex<DefaultGraphEngine>>,
+    engine: DefaultGraphEngine,
     connection_id: String,
     pending_result: Option<QueryResult>,
     pending_cursor: usize,
     bookmark_counter: u64,
+    in_transaction: bool,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.in_transaction {
+            let _ = self.engine.rollback();
+        }
+    }
 }
 
 async fn send_response(stream: &mut TcpStream, response: &BoltResponse) -> Result<(), BoltError> {
@@ -47,7 +55,7 @@ fn request_kind(req: &BoltRequest) -> RequestKind {
 }
 
 impl Session {
-    fn new(engine: Arc<Mutex<DefaultGraphEngine>>, connection_id: String) -> Self {
+    fn new(engine: DefaultGraphEngine, connection_id: String) -> Self {
         Self {
             state: BoltState::Negotiation,
             engine,
@@ -55,6 +63,7 @@ impl Session {
             pending_result: None,
             pending_cursor: 0,
             bookmark_counter: 0,
+            in_transaction: false,
         }
     }
 
@@ -67,13 +76,10 @@ impl Session {
 
     fn handle_run(&mut self, query: &str, params: &HashMap<String, PackValue>) -> BoltResponse {
         let graph_params = types::pack_params_to_hashmap(params);
-        let result = {
-            let mut engine = self.engine.lock().unwrap();
-            if graph_params.is_empty() {
-                engine.query(query)
-            } else {
-                engine.query_with_params(query, graph_params)
-            }
+        let result = if graph_params.is_empty() {
+            self.engine.query(query)
+        } else {
+            self.engine.query_with_params(query, graph_params)
         };
         match result {
             Ok(qr) => {
@@ -119,11 +125,18 @@ impl Session {
                 metadata.insert("has_more".into(), PackValue::Bool(true));
                 responses.push(BoltResponse::Success { metadata });
             } else {
+                let stats = &result.stats;
+                let query_type = if stats.nodes_created > 0 || stats.relationships_created > 0
+                    || stats.properties_set > 0 || stats.nodes_deleted > 0 {
+                    if result.columns.is_empty() { "w" } else { "rw" }
+                } else {
+                    "r"
+                };
                 let mut metadata = HashMap::new();
-                metadata.insert("type".into(), PackValue::String("w".into()));
+                metadata.insert("type".into(), PackValue::String(query_type.into()));
                 metadata.insert("t_last".into(), PackValue::Int(0));
                 metadata.insert("db".into(), PackValue::String("libsql-graph".into()));
-                let stats_map = types::query_stats_to_map(&result.stats);
+                let stats_map = types::query_stats_to_map(stats);
                 if !stats_map.is_empty() {
                     let pairs: Vec<(String, PackValue)> = stats_map.into_iter().collect();
                     metadata.insert("stats".into(), PackValue::Map(pairs));
@@ -134,7 +147,7 @@ impl Session {
             }
         } else {
             let mut metadata = HashMap::new();
-            metadata.insert("type".into(), PackValue::String("w".into()));
+            metadata.insert("type".into(), PackValue::String("r".into()));
             metadata.insert("t_last".into(), PackValue::Int(0));
             metadata.insert("db".into(), PackValue::String("libsql-graph".into()));
             responses.push(BoltResponse::Success { metadata });
@@ -173,12 +186,11 @@ impl Session {
     }
 
     fn handle_begin(&mut self) -> BoltResponse {
-        let result = {
-            let mut engine = self.engine.lock().unwrap();
-            engine.begin()
-        };
-        match result {
-            Ok(()) => BoltResponse::Success { metadata: HashMap::new() },
+        match self.engine.begin() {
+            Ok(()) => {
+                self.in_transaction = true;
+                BoltResponse::Success { metadata: HashMap::new() }
+            }
             Err(e) => {
                 let (code, message) = types::graph_error_to_bolt(&e);
                 BoltResponse::Failure { code, message }
@@ -187,12 +199,9 @@ impl Session {
     }
 
     fn handle_commit(&mut self) -> BoltResponse {
-        let result = {
-            let mut engine = self.engine.lock().unwrap();
-            engine.commit()
-        };
-        match result {
+        match self.engine.commit() {
             Ok(()) => {
+                self.in_transaction = false;
                 self.bookmark_counter += 1;
                 let mut metadata = HashMap::new();
                 metadata.insert(
@@ -209,12 +218,11 @@ impl Session {
     }
 
     fn handle_rollback(&mut self) -> BoltResponse {
-        let result = {
-            let mut engine = self.engine.lock().unwrap();
-            engine.rollback()
-        };
-        match result {
-            Ok(()) => BoltResponse::Success { metadata: HashMap::new() },
+        match self.engine.rollback() {
+            Ok(()) => {
+                self.in_transaction = false;
+                BoltResponse::Success { metadata: HashMap::new() }
+            }
             Err(e) => {
                 let (code, message) = types::graph_error_to_bolt(&e);
                 BoltResponse::Failure { code, message }
@@ -223,8 +231,9 @@ impl Session {
     }
 
     fn handle_reset(&mut self) -> BoltResponse {
-        if self.state == BoltState::TxReady || self.state == BoltState::TxStreaming {
-            let _ = self.engine.lock().unwrap().rollback();
+        if self.in_transaction {
+            let _ = self.engine.rollback();
+            self.in_transaction = false;
         }
         self.pending_result = None;
         self.pending_cursor = 0;
@@ -234,7 +243,7 @@ impl Session {
 
 pub async fn handle_connection(
     mut stream: TcpStream,
-    engine: Arc<Mutex<DefaultGraphEngine>>,
+    db_path: &str,
     conn_id: String,
 ) -> Result<(), BoltError> {
     let mut handshake_buf = [0u8; 20];
@@ -250,6 +259,12 @@ pub async fn handle_connection(
             return Ok(());
         }
     }
+
+    let engine = if std::path::Path::new(db_path).exists() {
+        DefaultGraphEngine::open(db_path).map_err(|e| BoltError::Engine(e.to_string()))?
+    } else {
+        DefaultGraphEngine::create(db_path, 4096).map_err(|e| BoltError::Engine(e.to_string()))?
+    };
 
     let mut session = Session::new(engine, conn_id);
 
@@ -269,6 +284,9 @@ pub async fn handle_connection(
         let request = BoltRequest::parse(pack_value)?;
 
         if matches!(request, BoltRequest::Goodbye) {
+            if session.in_transaction {
+                let _ = session.engine.rollback();
+            }
             return Ok(());
         }
 
