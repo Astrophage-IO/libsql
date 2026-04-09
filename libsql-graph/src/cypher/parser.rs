@@ -42,7 +42,8 @@ impl Parser {
             Token::Match => self.parse_match(),
             Token::Create => self.parse_create(),
             Token::Delete | Token::Detach => self.parse_delete_stmt(),
-            _ => Err(format!("expected MATCH, CREATE, or DELETE, got {:?}", self.peek())),
+            Token::Merge => self.parse_merge(),
+            _ => Err(format!("expected MATCH, CREATE, DELETE, or MERGE, got {:?}", self.peek())),
         }
     }
 
@@ -193,6 +194,13 @@ impl Parser {
     fn parse_return(&mut self) -> Result<ReturnClause, String> {
         self.expect(&Token::Return)?;
 
+        let distinct = if *self.peek() == Token::Distinct {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let mut items = Vec::new();
         if *self.peek() == Token::Star {
             self.advance();
@@ -233,6 +241,7 @@ impl Parser {
         };
 
         Ok(ReturnClause {
+            distinct,
             items,
             order_by,
             limit,
@@ -484,6 +493,20 @@ impl Parser {
             Token::Gt => BinOp::Gt,
             Token::Lte => BinOp::Lte,
             Token::Gte => BinOp::Gte,
+            Token::Contains => BinOp::Contains,
+            Token::In => BinOp::In,
+            Token::StartsWith => {
+                self.advance();
+                self.expect(&Token::Ident("WITH".into())).map_err(|_| "expected WITH after STARTS".to_string())?;
+                let right = self.parse_addition()?;
+                return Ok(Expr::BinaryOp(Box::new(left), BinOp::StartsWith, Box::new(right)));
+            }
+            Token::EndsWith => {
+                self.advance();
+                self.expect(&Token::Ident("WITH".into())).map_err(|_| "expected WITH after ENDS".to_string())?;
+                let right = self.parse_addition()?;
+                return Ok(Expr::BinaryOp(Box::new(left), BinOp::EndsWith, Box::new(right)));
+            }
             _ => return Ok(left),
         };
         self.advance();
@@ -588,6 +611,52 @@ impl Parser {
             }
             tok => Err(format!("unexpected token in expression: {:?}", tok)),
         }
+    }
+
+    fn parse_merge(&mut self) -> Result<Statement, String> {
+        self.expect(&Token::Merge)?;
+        let pattern = self.parse_node_pattern()?;
+
+        let mut on_create_set = Vec::new();
+        let mut on_match_set = Vec::new();
+
+        while *self.peek() == Token::OnCreate {
+            self.advance(); // ON
+            match self.peek() {
+                Token::Create => {
+                    self.advance();
+                    self.expect(&Token::Set)?;
+                    on_create_set.push(self.parse_set_clause()?);
+                    while *self.peek() == Token::Comma {
+                        self.advance();
+                        on_create_set.push(self.parse_set_clause()?);
+                    }
+                }
+                Token::Match => {
+                    self.advance();
+                    self.expect(&Token::Set)?;
+                    on_match_set.push(self.parse_set_clause()?);
+                    while *self.peek() == Token::Comma {
+                        self.advance();
+                        on_match_set.push(self.parse_set_clause()?);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let return_clause = if *self.peek() == Token::Return {
+            Some(self.parse_return()?)
+        } else {
+            None
+        };
+
+        Ok(Statement::Merge(MergeStatement {
+            pattern,
+            on_create_set,
+            on_match_set,
+            return_clause,
+        }))
     }
 }
 

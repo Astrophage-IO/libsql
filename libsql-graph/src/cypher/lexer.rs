@@ -20,6 +20,13 @@ pub enum Token {
     Null,
     As,
     In,
+    Distinct,
+    Contains,
+    StartsWith,
+    EndsWith,
+    Merge,
+    OnCreate,
+    OnMatch,
 
     Ident(String),
     Integer(i64),
@@ -298,6 +305,12 @@ fn keyword_or_ident(s: String) -> Token {
         "NULL" => Token::Null,
         "AS" => Token::As,
         "IN" => Token::In,
+        "DISTINCT" => Token::Distinct,
+        "CONTAINS" => Token::Contains,
+        "STARTS" => Token::StartsWith,
+        "ENDS" => Token::EndsWith,
+        "MERGE" => Token::Merge,
+        "ON" => Token::OnCreate, // resolved by parser context
         _ => Token::Ident(s),
     }
 }

@@ -54,6 +54,14 @@ pub enum PlanStep {
     Limit {
         count: u64,
     },
+    Distinct,
+    Merge {
+        variable: Option<String>,
+        label: Option<String>,
+        properties: Vec<(String, Literal)>,
+        on_create_set: Vec<SetClause>,
+        on_match_set: Vec<SetClause>,
+    },
 }
 
 pub fn plan(stmt: &Statement) -> Result<QueryPlan, String> {
@@ -61,6 +69,7 @@ pub fn plan(stmt: &Statement) -> Result<QueryPlan, String> {
         Statement::Match(m) => plan_match(m),
         Statement::Create(c) => plan_create(c),
         Statement::Delete(d) => plan_delete(d),
+        Statement::Merge(m) => plan_merge(m),
     }
 }
 
@@ -136,6 +145,9 @@ fn plan_match(m: &MatchStatement) -> Result<QueryPlan, String> {
         steps.push(PlanStep::Project {
             items: ret.items.clone(),
         });
+        if ret.distinct {
+            steps.push(PlanStep::Distinct);
+        }
         if let Some(ref order) = ret.order_by {
             steps.push(PlanStep::OrderBy {
                 items: order.clone(),
@@ -182,6 +194,25 @@ fn plan_create(c: &CreateStatement) -> Result<QueryPlan, String> {
     }
 
     if let Some(ref ret) = c.return_clause {
+        steps.push(PlanStep::Project {
+            items: ret.items.clone(),
+        });
+    }
+
+    Ok(QueryPlan { steps })
+}
+
+fn plan_merge(m: &MergeStatement) -> Result<QueryPlan, String> {
+    let mut steps = Vec::new();
+    steps.push(PlanStep::Merge {
+        variable: m.pattern.variable.clone(),
+        label: m.pattern.label.clone(),
+        properties: m.pattern.properties.clone(),
+        on_create_set: m.on_create_set.clone(),
+        on_match_set: m.on_match_set.clone(),
+    });
+
+    if let Some(ref ret) = m.return_clause {
         steps.push(PlanStep::Project {
             items: ret.items.clone(),
         });

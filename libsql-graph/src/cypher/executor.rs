@@ -192,6 +192,26 @@ pub fn execute(
             PlanStep::DeleteNode { variable, detach } => {
                 exec_delete(engine, &binding_table, variable, *detach, &mut stats)?;
             }
+            PlanStep::Merge {
+                variable,
+                label,
+                properties,
+                on_create_set,
+                on_match_set,
+            } => {
+                binding_table = exec_merge(
+                    engine,
+                    &binding_table,
+                    variable,
+                    label,
+                    properties,
+                    on_create_set,
+                    on_match_set,
+                    params,
+                    &mut stats,
+                )?;
+            }
+            PlanStep::Distinct => {}
             PlanStep::Project { items } => {
                 if items.len() == 1 && items[0].expr == Expr::Variable("*".to_string()) {
                     let mut all_vars: Vec<String> = binding_table
@@ -269,6 +289,15 @@ pub fn execute(
                 }
             }
             std::cmp::Ordering::Equal
+        });
+    }
+
+    let is_distinct = plan.steps.iter().any(|s| matches!(s, PlanStep::Distinct));
+    if is_distinct {
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|row| {
+            let key = format!("{:?}", row);
+            seen.insert(key)
         });
     }
 
@@ -753,6 +782,22 @@ fn eval_binop(left: &Value, op: BinOp, right: &Value) -> Value {
             (Value::Integer(a), Value::Integer(b)) if *b != 0 => Value::Integer(a % b),
             _ => Value::Null,
         },
+        BinOp::Contains => match (left, right) {
+            (Value::String(a), Value::String(b)) => Value::Bool(a.contains(b.as_str())),
+            _ => Value::Null,
+        },
+        BinOp::StartsWith => match (left, right) {
+            (Value::String(a), Value::String(b)) => Value::Bool(a.starts_with(b.as_str())),
+            _ => Value::Null,
+        },
+        BinOp::EndsWith => match (left, right) {
+            (Value::String(a), Value::String(b)) => Value::Bool(a.ends_with(b.as_str())),
+            _ => Value::Null,
+        },
+        BinOp::In => match right {
+            Value::List(items) => Value::Bool(items.contains(left)),
+            _ => Value::Null,
+        },
     }
 }
 
@@ -781,6 +826,100 @@ fn expr_name(expr: &Expr) -> String {
         }
         _ => "expr".to_string(),
     }
+}
+
+fn exec_merge(
+    engine: &mut GraphEngine,
+    _current: &[Bindings],
+    variable: &Option<String>,
+    label: &Option<String>,
+    properties: &[(String, Literal)],
+    on_create_set: &[SetClause],
+    on_match_set: &[SetClause],
+    params: &HashMap<String, Value>,
+    stats: &mut QueryStats,
+) -> Result<Vec<Bindings>, GraphError> {
+    let label_name = label.as_deref().unwrap_or("_default");
+    let max_id = engine.db().header().next_node_id;
+
+    let label_token = {
+        let next = engine.db().header().next_token_id;
+        let store = crate::storage::token_store::TokenStore::new(
+            engine.db().header().token_store_root,
+            engine.db().page_size() as usize,
+        );
+        store.find_by_name(
+            engine.db().pager(),
+            label_name,
+            crate::storage::token_store::TOKEN_KIND_LABEL,
+            next,
+        )?
+    };
+
+    let mut found_id = None;
+    if let Some(lt) = label_token {
+        for id in 0..max_id {
+            let node = engine.get_node(id)?;
+            if !node.in_use() || node.label_token_id != lt {
+                continue;
+            }
+            let mut match_all = true;
+            for (key, expected) in properties {
+                let actual = engine.get_node_property(id, key)?;
+                let expected_val = Value::from_literal(expected);
+                match actual {
+                    Some(pv) if Value::from_property(&pv) == expected_val => {}
+                    _ => {
+                        match_all = false;
+                        break;
+                    }
+                }
+            }
+            if match_all {
+                found_id = Some(id);
+                break;
+            }
+        }
+    }
+
+    let node_id;
+    if let Some(id) = found_id {
+        node_id = id;
+        for set_clause in on_match_set {
+            let val = eval_expr(
+                engine,
+                &set_clause.value,
+                &HashMap::new(),
+                params,
+            );
+            engine.set_node_property(node_id, &set_clause.property, val.to_property())?;
+            stats.properties_set += 1;
+        }
+    } else {
+        node_id = engine.create_node(label_name)?;
+        stats.nodes_created += 1;
+        for (key, val) in properties {
+            let pv = Value::from_literal(val).to_property();
+            engine.set_node_property(node_id, key, pv)?;
+            stats.properties_set += 1;
+        }
+        for set_clause in on_create_set {
+            let val = eval_expr(
+                engine,
+                &set_clause.value,
+                &HashMap::new(),
+                params,
+            );
+            engine.set_node_property(node_id, &set_clause.property, val.to_property())?;
+            stats.properties_set += 1;
+        }
+    }
+
+    let mut bindings = HashMap::new();
+    if let Some(var) = variable {
+        bindings.insert(var.clone(), Value::Node(node_id));
+    }
+    Ok(vec![bindings])
 }
 
 fn is_aggregate_expr(expr: &Expr) -> bool {
@@ -1306,6 +1445,144 @@ mod tests {
         } else {
             panic!("expected list");
         }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_distinct() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        engine.create_relationship(0, 2, "KNOWS").unwrap(); // duplicate Alice->Charlie
+
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person)-[:KNOWS]->(b) RETURN DISTINCT a.name",
+        );
+        let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
+        let unique: std::collections::HashSet<String> =
+            names.iter().map(|v| format!("{v}")).collect();
+        assert_eq!(unique.len(), names.len());
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_string_contains() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name CONTAINS 'li' RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 2);
+        let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
+        assert!(names.contains(&&Value::String("Alice".into())));
+        assert!(names.contains(&&Value::String("Charlie".into())));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_string_starts_with() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name STARTS WITH 'Al' RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_string_ends_with() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name ENDS WITH 'ob' RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Bob".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_merge_creates_new() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        let result = engine
+            .query("MERGE (n:Person {name: 'Alice'}) RETURN n")
+            .unwrap();
+        assert_eq!(result.stats.nodes_created, 1);
+        assert_eq!(engine.node_count(), 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_merge_finds_existing() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let initial_count = engine.node_count();
+        let result = engine
+            .query("MERGE (n:Person {name: 'Alice'}) RETURN n")
+            .unwrap();
+        assert_eq!(result.stats.nodes_created, 0);
+        assert_eq!(engine.node_count(), initial_count);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_merge_idempotent() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.query("MERGE (n:City {name: 'Berlin'})").unwrap();
+        engine.query("MERGE (n:City {name: 'Berlin'})").unwrap();
+        engine.query("MERGE (n:City {name: 'Berlin'})").unwrap();
+        assert_eq!(engine.node_count(), 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_rel_property_set_get() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        engine
+            .set_rel_property(0, "since", PropertyValue::Int32(2020))
+            .unwrap();
+
+        let val = engine.get_rel_property(0, "since").unwrap();
+        assert_eq!(val, Some(PropertyValue::Int32(2020)));
+
+        let missing = engine.get_rel_property(0, "weight").unwrap();
+        assert_eq!(missing, None);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_rel_type_name() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let rel = engine.get_rel(0).unwrap();
+        let name = engine.get_rel_type_name(rel.type_token_id).unwrap();
+        assert_eq!(name, "KNOWS");
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

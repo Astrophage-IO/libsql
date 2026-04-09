@@ -337,6 +337,128 @@ pub fn dfs(
     Ok(result)
 }
 
+pub fn dijkstra(
+    pager: &mut GraphPager,
+    node_store: &NodeStore,
+    rel_store: &RelStore,
+    start_id: u64,
+    target_id: u64,
+    weight_property_token: Option<u16>,
+    property_store: Option<&crate::storage::property_store::PropertyStore>,
+) -> Result<Option<(Vec<u64>, f64)>, GraphError> {
+    use std::collections::{BinaryHeap, HashMap};
+    use std::cmp::Ordering;
+
+    #[derive(Debug)]
+    struct State {
+        cost: f64,
+        node_id: u64,
+    }
+
+    impl PartialEq for State {
+        fn eq(&self, other: &Self) -> bool {
+            self.node_id == other.node_id
+        }
+    }
+    impl Eq for State {}
+
+    impl PartialOrd for State {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for State {
+        fn cmp(&self, other: &Self) -> Ordering {
+            other.cost.partial_cmp(&self.cost).unwrap_or(Ordering::Equal)
+        }
+    }
+
+    if start_id == target_id {
+        return Ok(Some((vec![start_id], 0.0)));
+    }
+
+    let mut dist: HashMap<u64, f64> = HashMap::new();
+    let mut parent: HashMap<u64, u64> = HashMap::new();
+    let mut heap = BinaryHeap::new();
+
+    dist.insert(start_id, 0.0);
+    heap.push(State {
+        cost: 0.0,
+        node_id: start_id,
+    });
+
+    while let Some(State { cost, node_id }) = heap.pop() {
+        if node_id == target_id {
+            let mut path = vec![target_id];
+            let mut cur = target_id;
+            while let Some(&p) = parent.get(&cur) {
+                path.push(p);
+                cur = p;
+            }
+            path.reverse();
+            return Ok(Some((path, cost)));
+        }
+
+        if cost > *dist.get(&node_id).unwrap_or(&f64::INFINITY) {
+            continue;
+        }
+
+        let node = node_store.read_node(pager, node_id)?;
+        if !node.in_use() || node.first_rel.is_null() {
+            continue;
+        }
+
+        let anchor = node_store.address(node_id);
+        let mut cursor = RelChainCursor::new(node.first_rel, anchor, Direction::Both);
+
+        while let Some((rel, _rel_addr)) = cursor.next(pager, rel_store)? {
+            let is_source = rel.source_node == anchor;
+            let neighbor_addr = if is_source {
+                rel.target_node
+            } else {
+                rel.source_node
+            };
+
+            let rpp = node_store.records_per_page() as u64;
+            let store_root = node_store.address(0).page;
+            let neighbor_id =
+                (neighbor_addr.page - store_root) as u64 * rpp + neighbor_addr.slot as u64;
+
+            let edge_weight = if let (Some(token), Some(ps)) =
+                (weight_property_token, property_store)
+            {
+                if !rel.first_prop.is_null() {
+                    ps.get_property(pager, rel.first_prop, token)?
+                        .map(|pv| match pv {
+                            crate::storage::property_store::PropertyValue::Int32(n) => n as f64,
+                            crate::storage::property_store::PropertyValue::Int64(n) => n as f64,
+                            crate::storage::property_store::PropertyValue::Float64(f) => f,
+                            _ => 1.0,
+                        })
+                        .unwrap_or(1.0)
+                } else {
+                    1.0
+                }
+            } else {
+                1.0
+            };
+
+            let new_cost = cost + edge_weight;
+            if new_cost < *dist.get(&neighbor_id).unwrap_or(&f64::INFINITY) {
+                dist.insert(neighbor_id, new_cost);
+                parent.insert(neighbor_id, node_id);
+                heap.push(State {
+                    cost: new_cost,
+                    node_id: neighbor_id,
+                });
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +743,85 @@ mod tests {
         assert!(ids.contains(&2));
         assert!(ids.contains(&3));
         assert!(ids.contains(&4));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dijkstra_unweighted() {
+        let path = temp_path();
+        let mut engine = build_test_graph(&path);
+
+        let node_store = NodeStore::new(engine.db().header().node_store_root, 4096);
+        let rel_store = RelStore::new(engine.db().header().rel_store_root, 4096);
+
+        let result = dijkstra(
+            engine.db().pager(),
+            &node_store,
+            &rel_store,
+            0,
+            4,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(result.is_some());
+        let (path_nodes, cost) = result.unwrap();
+        assert_eq!(*path_nodes.first().unwrap(), 0);
+        assert_eq!(*path_nodes.last().unwrap(), 4);
+        assert_eq!(cost, 3.0); // 0->1->3->4 or 0->2->3->4, all weight 1
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dijkstra_same_node() {
+        let path = temp_path();
+        let mut engine = build_test_graph(&path);
+
+        let node_store = NodeStore::new(engine.db().header().node_store_root, 4096);
+        let rel_store = RelStore::new(engine.db().header().rel_store_root, 4096);
+
+        let result = dijkstra(
+            engine.db().pager(),
+            &node_store,
+            &rel_store,
+            2,
+            2,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, Some((vec![2], 0.0)));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dijkstra_unreachable() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.create_node("A").unwrap();
+        engine.create_node("B").unwrap();
+
+        let node_store = NodeStore::new(engine.db().header().node_store_root, 4096);
+        let rel_store = RelStore::new(engine.db().header().rel_store_root, 4096);
+
+        let result = dijkstra(
+            engine.db().pager(),
+            &node_store,
+            &rel_store,
+            0,
+            1,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(result, None);
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

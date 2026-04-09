@@ -3,6 +3,7 @@ pub enum Statement {
     Match(MatchStatement),
     Create(CreateStatement),
     Delete(DeleteStatement),
+    Merge(MergeStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -56,9 +57,18 @@ pub struct SetClause {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReturnClause {
+    pub distinct: bool,
     pub items: Vec<ReturnItem>,
     pub order_by: Option<Vec<OrderItem>>,
     pub limit: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeStatement {
+    pub pattern: NodePattern,
+    pub on_create_set: Vec<SetClause>,
+    pub on_match_set: Vec<SetClause>,
+    pub return_clause: Option<ReturnClause>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,6 +153,10 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    Contains,
+    StartsWith,
+    EndsWith,
+    In,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

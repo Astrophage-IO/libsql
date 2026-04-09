@@ -396,6 +396,104 @@ impl GraphEngine {
         Ok(result)
     }
 
+    pub fn set_rel_property(
+        &mut self,
+        rel_id: u64,
+        key: &str,
+        value: PropertyValue,
+    ) -> Result<(), GraphError> {
+        self.db.pager().begin_write()?;
+        let key_id = self.get_or_create_prop_key(key)?;
+        let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
+
+        if rel.first_prop.is_null() {
+            let prop_id = self.db.next_prop_id();
+            let mut record = PropertyRecord::new();
+            record.add_block(PropertyBlock::new(key_id, &value));
+            let addr = self
+                .property_store
+                .create_record(self.db.pager(), prop_id, &record)?;
+            let mut updated_rel = rel;
+            updated_rel.first_prop = addr;
+            self.rel_store
+                .write_rel(self.db.pager(), rel_id, &updated_rel)?;
+        } else {
+            let mut current = rel.first_prop;
+            let mut prev = RecordAddress::NULL;
+            while !current.is_null() {
+                let mut record = self
+                    .property_store
+                    .read_record(self.db.pager(), current)?;
+                if record.set_block(key_id, PropertyBlock::new(key_id, &value)) {
+                    self.property_store
+                        .write_record(self.db.pager(), current, &record)?;
+                    self.flush_and_commit()?;
+                    return Ok(());
+                }
+                prev = current;
+                current = record.next_prop;
+            }
+            let prop_id = self.db.next_prop_id();
+            let mut new_record = PropertyRecord::new();
+            new_record.add_block(PropertyBlock::new(key_id, &value));
+            let new_addr = self
+                .property_store
+                .create_record(self.db.pager(), prop_id, &new_record)?;
+            let mut prev_record = self
+                .property_store
+                .read_record(self.db.pager(), prev)?;
+            prev_record.next_prop = new_addr;
+            self.property_store
+                .write_record(self.db.pager(), prev, &prev_record)?;
+        }
+
+        self.flush_and_commit()
+    }
+
+    pub fn get_rel_property(
+        &mut self,
+        rel_id: u64,
+        key: &str,
+    ) -> Result<Option<PropertyValue>, GraphError> {
+        let key_id = {
+            let next = self.db.header().next_token_id;
+            let label = self.token_store.find_by_name(
+                self.db.pager(),
+                key,
+                TOKEN_KIND_LABEL,
+                next,
+            )?;
+            let rel = self.token_store.find_by_name(
+                self.db.pager(),
+                key,
+                TOKEN_KIND_REL_TYPE,
+                next,
+            )?;
+            match label.or(rel) {
+                Some(id) => id as u16,
+                None => return Ok(None),
+            }
+        };
+
+        let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
+        if rel.first_prop.is_null() {
+            return Ok(None);
+        }
+        self.property_store
+            .get_property(self.db.pager(), rel.first_prop, key_id)
+    }
+
+    pub fn get_rel(&mut self, rel_id: u64) -> Result<RelRecord, GraphError> {
+        self.rel_store.read_rel(self.db.pager(), rel_id)
+    }
+
+    pub fn get_rel_type_name(&mut self, type_token_id: u32) -> Result<String, GraphError> {
+        let token = self
+            .token_store
+            .read_token(self.db.pager(), type_token_id)?;
+        Ok(token.name_str().to_string())
+    }
+
     pub fn delete_relationship(&mut self, rel_id: u64) -> Result<(), GraphError> {
         self.db.pager().begin_write()?;
 
