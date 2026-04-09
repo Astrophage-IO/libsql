@@ -1,6 +1,7 @@
 pub mod database;
 pub mod freespace;
 pub mod header;
+pub mod label_index;
 pub mod node_store;
 pub mod page;
 pub mod pager_bridge;

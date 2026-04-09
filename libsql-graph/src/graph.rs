@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::cypher::executor::{self, QueryResult, Value};
+use crate::cypher::explain;
 use crate::cypher::{parser, planner};
 use crate::error::GraphError;
 use crate::storage::database::GraphDatabase;
@@ -262,6 +263,14 @@ impl GraphEngine {
         let plan = planner::plan(&stmt)
             .map_err(|e| GraphError::PagerError(format!("plan error: {e}")))?;
         executor::execute(self, &plan, &params)
+    }
+
+    pub fn explain(&self, cypher: &str) -> Result<String, GraphError> {
+        let stmt = parser::parse(cypher)
+            .map_err(|e| GraphError::PagerError(format!("parse error: {e}")))?;
+        let plan = planner::plan(&stmt)
+            .map_err(|e| GraphError::PagerError(format!("plan error: {e}")))?;
+        Ok(explain::explain(&plan))
     }
 
     pub fn get_or_create_prop_key(&mut self, name: &str) -> Result<u16, GraphError> {
