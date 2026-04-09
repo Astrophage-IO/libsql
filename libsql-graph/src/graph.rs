@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::cypher::executor::{self, QueryResult, Value};
 use crate::cypher::explain;
-use crate::cypher::{parser, planner};
+use crate::cypher::{optimizer, parser, planner};
 use crate::error::GraphError;
 use crate::storage::database::GraphDatabase;
 use crate::storage::pager::Pager;
@@ -447,9 +447,34 @@ impl<P: Pager> GraphEngine<P> {
         self.db.header().edge_count
     }
 
+    pub fn label_index_roots(&mut self) -> HashMap<u32, u32> {
+        let _ = self;
+        HashMap::new()
+    }
+
+    pub fn label_name_to_id(&mut self) -> HashMap<String, u32> {
+        let mut map = HashMap::new();
+        let next_token = self.db.header().next_token_id;
+        for id in 0..next_token {
+            if let Ok(token) = self.token_store.read_token(self.db.pager(), id) {
+                if token.in_use() && token.kind() == 0 {
+                    map.insert(token.name_str().to_string(), id);
+                }
+            }
+        }
+        map
+    }
+
+    fn optimize_plan(&mut self, plan: crate::cypher::planner::QueryPlan) -> crate::cypher::planner::QueryPlan {
+        let roots = self.label_index_roots();
+        let names = self.label_name_to_id();
+        optimizer::optimize(plan, &self.stats, &roots, &names)
+    }
+
     pub fn query(&mut self, cypher: &str) -> Result<QueryResult, GraphError> {
         let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
         let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
         executor::execute(self, &plan, &HashMap::new())
     }
 
@@ -460,6 +485,7 @@ impl<P: Pager> GraphEngine<P> {
     ) -> Result<QueryResult, GraphError> {
         let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
         let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
         executor::execute(self, &plan, &params)
     }
 
@@ -470,6 +496,7 @@ impl<P: Pager> GraphEngine<P> {
 
         let plan_start = std::time::Instant::now();
         let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
         let plan_time = plan_start.elapsed();
 
         let plan_text = explain::explain(&plan);
@@ -488,9 +515,10 @@ impl<P: Pager> GraphEngine<P> {
         })
     }
 
-    pub fn explain(&self, cypher: &str) -> Result<String, GraphError> {
+    pub fn explain(&mut self, cypher: &str) -> Result<String, GraphError> {
         let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
         let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
         Ok(explain::explain_with_costs(&plan, &self.stats))
     }
 
@@ -1188,6 +1216,7 @@ impl<'a, P: Pager> TransactionBatch<'a, P> {
                     return Err(GraphError::QueryPlan(e));
                 }
             };
+            let plan = self.engine.optimize_plan(plan);
             match executor::execute(self.engine, &plan, params) {
                 Ok(result) => results.push(result),
                 Err(e) => {
@@ -2186,5 +2215,278 @@ mod tests {
 
         let restored = GraphStats::deserialize(&buf).unwrap();
         assert_eq!(stats, restored);
+    }
+
+    #[test]
+    fn test_optimizer_indexed_node_scan_explain() {
+        use crate::storage::label_index::LabelIndex;
+
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..100u64 {
+            engine.create_node("Person").unwrap();
+        }
+        for _ in 0..100u64 {
+            engine.create_node("City").unwrap();
+        }
+
+        let person_label_id = engine.get_node(0).unwrap().label_token_id;
+        let ps = engine.db().page_size() as usize;
+
+        let index_root = {
+            let label_idx = LabelIndex::new(ps);
+            engine.begin().unwrap();
+            let (root, mut idx_page) = engine.db().pager().alloc_page().unwrap();
+            let data = idx_page.data_mut().unwrap();
+            data.fill(0);
+            engine.db().pager().write_page(&idx_page).unwrap();
+            for id in 0..100u64 {
+                label_idx
+                    .set_label(engine.db().pager(), person_label_id, id, root)
+                    .unwrap();
+            }
+            engine.commit().unwrap();
+            root
+        };
+
+        let stmt = parser::parse("MATCH (p:Person) RETURN p").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let mut roots = HashMap::new();
+        roots.insert(person_label_id, index_root);
+        let mut names = HashMap::new();
+        names.insert("Person".to_string(), person_label_id);
+        let optimized = optimizer::optimize(plan, engine.stats(), &roots, &names);
+
+        assert!(optimized.steps.iter().any(|s| matches!(
+            s,
+            crate::cypher::planner::PlanStep::IndexedNodeScan { .. }
+        )));
+
+        let explain_text = crate::cypher::explain::explain(&optimized);
+        assert!(explain_text.contains("IndexedNodeScan"));
+
+        let result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 100);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_predicate_pushdown() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for i in 0..10 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "age", PropertyValue::Int32(20 + i))
+                .unwrap();
+        }
+        for i in 0..10u64 {
+            engine.create_relationship(i, (i + 1) % 10, "KNOWS").unwrap();
+        }
+
+        let stmt = parser::parse("MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 25 RETURN b").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let names = engine.label_name_to_id();
+        let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+
+        let filter_pos = optimized
+            .steps
+            .iter()
+            .position(|s| matches!(s, crate::cypher::planner::PlanStep::Filter { .. }));
+        let expand_pos = optimized
+            .steps
+            .iter()
+            .position(|s| matches!(s, crate::cypher::planner::PlanStep::Expand { .. }));
+        assert!(filter_pos.unwrap() < expand_pos.unwrap());
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_join_reorder() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        for i in 0..1000 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("P{i}")))
+                .unwrap();
+        }
+        for i in 0..5 {
+            let id = engine.create_node("City").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("C{i}")))
+                .unwrap();
+        }
+
+        let mut stats = engine.stats().clone();
+        let person_id = engine.get_node(0).unwrap().label_token_id;
+        let city_id = engine.get_node(1000).unwrap().label_token_id;
+        stats.label_counts.insert(person_id, 1000);
+        stats.label_counts.insert(city_id, 5);
+
+        let names = engine.label_name_to_id();
+
+        let plan = crate::cypher::planner::QueryPlan {
+            steps: vec![
+                crate::cypher::planner::PlanStep::NodeScan {
+                    variable: "a".into(),
+                    label: Some("Person".into()),
+                    properties: vec![],
+                    optional: false,
+                },
+                crate::cypher::planner::PlanStep::Expand {
+                    from_var: "a".into(),
+                    rel_var: None,
+                    to_var: "c".into(),
+                    rel_type: Some("LIVES_IN".into()),
+                    direction: Direction::Outgoing,
+                    min_hops: None,
+                    max_hops: None,
+                    optional: false,
+                },
+                crate::cypher::planner::PlanStep::NodeScan {
+                    variable: "c".into(),
+                    label: Some("City".into()),
+                    properties: vec![],
+                    optional: false,
+                },
+                crate::cypher::planner::PlanStep::Project {
+                    items: vec![crate::cypher::ast::ReturnItem {
+                        expr: crate::cypher::ast::Expr::Variable("a".into()),
+                        alias: None,
+                    }],
+                },
+            ],
+        };
+
+        let optimized = optimizer::optimize(plan, &stats, &HashMap::new(), &names);
+        assert!(matches!(
+            &optimized.steps[0],
+            crate::cypher::planner::PlanStep::NodeScan { label: Some(l), .. } if l == "City"
+        ));
+    }
+
+    #[test]
+    fn test_optimizer_correctness() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for i in 0..20 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("P{i}")))
+                .unwrap();
+            engine
+                .set_node_property(id, "age", PropertyValue::Int32(20 + i))
+                .unwrap();
+        }
+        for i in 0..20u64 {
+            engine.create_relationship(i, (i + 1) % 20, "KNOWS").unwrap();
+        }
+
+        let cypher = "MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 30 RETURN a.name, b.name";
+        let stmt = parser::parse(cypher).unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+
+        let unoptimized_result =
+            executor::execute(&mut engine, &plan, &HashMap::new()).unwrap();
+
+        let names = engine.label_name_to_id();
+        let optimized =
+            optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+        let optimized_result =
+            executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+
+        assert_eq!(unoptimized_result.columns, optimized_result.columns);
+        assert_eq!(unoptimized_result.rows.len(), optimized_result.rows.len());
+
+        let mut unopt_sorted: Vec<_> = unoptimized_result
+            .rows
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect();
+        let mut opt_sorted: Vec<_> = optimized_result
+            .rows
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect();
+        unopt_sorted.sort();
+        opt_sorted.sort();
+        assert_eq!(unopt_sorted, opt_sorted);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_no_index_fallback() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for i in 0..10 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("P{i}")))
+                .unwrap();
+        }
+
+        let stmt = parser::parse("MATCH (p:Person) RETURN p.name").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let names = engine.label_name_to_id();
+        let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+
+        assert!(matches!(
+            &optimized.steps[0],
+            crate::cypher::planner::PlanStep::NodeScan { label: Some(l), .. } if l == "Person"
+        ));
+        assert!(!optimized.steps.iter().any(|s| matches!(
+            s,
+            crate::cypher::planner::PlanStep::IndexedNodeScan { .. }
+        )));
+
+        let result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 10);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_empty_stats() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let stmt = parser::parse("MATCH (a:Person) RETURN a").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let names = engine.label_name_to_id();
+        let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+        assert_eq!(optimized.steps.len(), 2);
+
+        let result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 0);
+
+        let stmt2 =
+            parser::parse("MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 25 RETURN b").unwrap();
+        let plan2 = planner::plan(&stmt2).unwrap();
+        let optimized2 = optimizer::optimize(plan2, engine.stats(), &HashMap::new(), &names);
+        assert!(!optimized2.steps.is_empty());
+
+        let result2 = executor::execute(&mut engine, &optimized2, &HashMap::new()).unwrap();
+        assert_eq!(result2.rows.len(), 0);
     }
 }

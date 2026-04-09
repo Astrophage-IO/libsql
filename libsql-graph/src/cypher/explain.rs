@@ -82,6 +82,9 @@ fn operation_name(step: &PlanStep) -> String {
         PlanStep::With { .. } => "With".into(),
         PlanStep::Merge { .. } => "Merge".into(),
         PlanStep::Unwind { .. } => "Unwind".into(),
+        PlanStep::IndexedNodeScan { optional, .. } => {
+            if *optional { "OptionalIndexedNodeScan".into() } else { "IndexedNodeScan".into() }
+        }
     }
 }
 
@@ -226,6 +229,22 @@ fn format_step(step: &PlanStep) -> String {
                 properties.len()
             )
         }
+        PlanStep::IndexedNodeScan {
+            variable,
+            label,
+            optional,
+            properties,
+            ..
+        } => {
+            let opt_prefix = if *optional { "Optional" } else { "" };
+            let props_str = if properties.is_empty() {
+                String::new()
+            } else {
+                let kv: Vec<String> = properties.iter().map(|(k, _)| k.clone()).collect();
+                format!(" {{{}}}", kv.join(", "))
+            };
+            format!("{opt_prefix}IndexedNodeScan({variable}:{label}{props_str})")
+        }
     }
 }
 
@@ -289,6 +308,7 @@ fn estimate_rows(step: &PlanStep) -> String {
         PlanStep::Distinct => "<=input".into(),
         PlanStep::With { .. } => "<=input".into(),
         PlanStep::Unwind { .. } => "N*list_len".into(),
+        PlanStep::IndexedNodeScan { .. } => "N/label_idx".into(),
         _ => "-".into(),
     }
 }

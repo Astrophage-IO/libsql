@@ -267,6 +267,34 @@ pub fn execute<P: Pager>(
                 }
                 binding_table = new_table;
             }
+            PlanStep::IndexedNodeScan {
+                variable,
+                label,
+                index_root,
+                properties,
+                optional,
+            } => {
+                let prev = binding_table.clone();
+                binding_table = exec_indexed_node_scan(
+                    engine,
+                    &binding_table,
+                    variable,
+                    label,
+                    *index_root,
+                    properties,
+                )?;
+                if *optional && binding_table.is_empty() {
+                    binding_table = prev
+                        .into_iter()
+                        .map(|mut b| {
+                            if !variable.is_empty() {
+                                b.insert(variable.clone(), Value::Null);
+                            }
+                            b
+                        })
+                        .collect();
+                }
+            }
             PlanStep::Distinct => {}
             PlanStep::With { items, where_clause } => {
                 let mut new_table = Vec::new();
@@ -441,6 +469,88 @@ fn exec_node_scan<P: Pager>(
 
     let max_id = engine.db().header().next_node_id;
     for id in 0..max_id {
+        let node = engine.get_node(id)?;
+        if !node.in_use() {
+            continue;
+        }
+        if let Some(lt) = label_token {
+            if node.label_token_id != lt {
+                continue;
+            }
+        }
+
+        let mut match_props = true;
+        for (key, expected) in properties {
+            let actual = engine.get_node_property(id, key)?;
+            let expected_val = Value::from_literal(expected);
+            match actual {
+                Some(pv) if Value::from_property(&pv) == expected_val => {}
+                _ => {
+                    match_props = false;
+                    break;
+                }
+            }
+        }
+        if !match_props {
+            continue;
+        }
+
+        if has_existing_bindings {
+            for existing in current {
+                let mut bindings = existing.clone();
+                if !variable.is_empty() {
+                    bindings.insert(variable.to_string(), Value::Node(id));
+                }
+                results.push(bindings);
+            }
+        } else {
+            let mut bindings = HashMap::new();
+            if !variable.is_empty() {
+                bindings.insert(variable.to_string(), Value::Node(id));
+            }
+            results.push(bindings);
+        }
+    }
+
+    Ok(results)
+}
+
+fn exec_indexed_node_scan<P: Pager>(
+    engine: &mut GraphEngine<P>,
+    current: &[Bindings],
+    variable: &str,
+    label: &str,
+    index_root: u32,
+    properties: &[(String, Literal)],
+) -> Result<Vec<Bindings>, GraphError> {
+    let has_existing_bindings = current.iter().any(|b| !b.is_empty());
+    let var_already_bound = !variable.is_empty()
+        && current.iter().any(|b| b.contains_key(variable));
+
+    if var_already_bound {
+        return Ok(current.to_vec());
+    }
+
+    let label_index = crate::storage::label_index::LabelIndex::new(engine.db().page_size() as usize);
+    let max_node_id = engine.db().header().next_node_id;
+    let node_ids = label_index.scan(engine.db().pager(), index_root, max_node_id)?;
+
+    let label_token = {
+        let next = engine.db().header().next_token_id;
+        let store = crate::storage::token_store::TokenStore::new(
+            engine.db().header().token_store_root,
+            engine.db().page_size() as usize,
+        );
+        store.find_by_name(
+            engine.db().pager(),
+            label,
+            crate::storage::token_store::TOKEN_KIND_LABEL,
+            next,
+        )?
+    };
+
+    let mut results = Vec::new();
+    for id in node_ids {
         let node = engine.get_node(id)?;
         if !node.in_use() {
             continue;

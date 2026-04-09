@@ -27,6 +27,13 @@ pub fn estimate_step_cost(step: &PlanStep, stats: &GraphStats) -> CostEstimate {
                 estimated_cost: avg_deg,
             }
         }
+        PlanStep::IndexedNodeScan { .. } => {
+            let est = (stats.node_count as f64 * 0.1).max(1.0);
+            CostEstimate {
+                estimated_rows: est,
+                estimated_cost: est * 0.5,
+            }
+        }
         PlanStep::Filter { .. } => CostEstimate {
             estimated_rows: 0.0,
             estimated_cost: 0.1,

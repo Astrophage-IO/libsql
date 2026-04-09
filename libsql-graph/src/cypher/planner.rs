@@ -75,6 +75,13 @@ pub enum PlanStep {
         on_create_set: Vec<SetClause>,
         on_match_set: Vec<SetClause>,
     },
+    IndexedNodeScan {
+        variable: String,
+        label: String,
+        index_root: u32,
+        properties: Vec<(String, Literal)>,
+        optional: bool,
+    },
 }
 
 pub fn plan(stmt: &Statement) -> Result<QueryPlan, String> {
