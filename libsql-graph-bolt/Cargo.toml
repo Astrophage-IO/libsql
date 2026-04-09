@@ -11,4 +11,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macro
 bytes = "1"
 libsql-graph = { path = "../libsql-graph" }
 
+[[bin]]
+name = "bolt-server"
+path = "src/bin/bolt_server.rs"
+
 [dev-dependencies]
