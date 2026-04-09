@@ -11,6 +11,7 @@ pub mod pager_bridge;
 pub mod property_store;
 pub mod record;
 pub mod rel_store;
+pub mod stats;
 pub mod string_overflow;
 pub mod token_store;
 pub mod wal;

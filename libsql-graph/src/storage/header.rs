@@ -23,6 +23,7 @@ pub struct GraphHeader {
     pub label_count: u32,
     pub rel_type_count: u32,
     pub dense_threshold: u32,
+    pub stats_page: u32,
 }
 
 impl GraphHeader {
@@ -45,11 +46,12 @@ impl GraphHeader {
             label_count: 0,
             rel_type_count: 0,
             dense_threshold: 50,
+            stats_page: 0,
         }
     }
 
     pub fn read(data: &[u8]) -> Result<Self, GraphError> {
-        if data.len() < 168 {
+        if data.len() < 172 {
             return Err(GraphError::CorruptPage(1));
         }
 
@@ -75,11 +77,12 @@ impl GraphHeader {
             label_count: u32::from_le_bytes(data[156..160].try_into().unwrap()),
             rel_type_count: u32::from_le_bytes(data[160..164].try_into().unwrap()),
             dense_threshold: u32::from_le_bytes(data[164..168].try_into().unwrap()),
+            stats_page: u32::from_le_bytes(data[168..172].try_into().unwrap()),
         })
     }
 
     pub fn write(&self, data: &mut [u8]) -> Result<(), GraphError> {
-        if data.len() < 168 {
+        if data.len() < 172 {
             return Err(GraphError::CorruptPage(1));
         }
 
@@ -101,6 +104,7 @@ impl GraphHeader {
         data[156..160].copy_from_slice(&self.label_count.to_le_bytes());
         data[160..164].copy_from_slice(&self.rel_type_count.to_le_bytes());
         data[164..168].copy_from_slice(&self.dense_threshold.to_le_bytes());
+        data[168..172].copy_from_slice(&self.stats_page.to_le_bytes());
         Ok(())
     }
 

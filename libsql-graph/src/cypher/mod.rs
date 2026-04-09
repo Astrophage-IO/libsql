@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod cost;
 pub mod executor;
 pub mod explain;
 pub mod lexer;

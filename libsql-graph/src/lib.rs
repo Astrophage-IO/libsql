@@ -12,6 +12,7 @@ pub use graph::{DefaultGraphEngine, Direction, GraphEngine, GraphSchema, LabelIn
 pub use cypher::executor::{QueryResult, QueryStats, Value};
 pub use storage::pager::Pager;
 pub use storage::property_store::PropertyValue;
+pub use storage::stats::GraphStats;
 pub use batch::{BatchNodeBuilder, BatchRelBuilder};
 
 pub mod prelude {

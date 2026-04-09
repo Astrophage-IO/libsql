@@ -14,6 +14,7 @@ use crate::storage::property_store::{
 use crate::storage::record::RecordAddress;
 use crate::storage::rel_store::{RelRecord, RelStore};
 use crate::storage::dense::RelGroupStore;
+use crate::storage::stats::GraphStats;
 use crate::storage::string_overflow::StringOverflowStore;
 use crate::storage::token_store::{
     TokenRecord, TokenStore, TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE,
@@ -29,15 +30,26 @@ pub struct GraphEngine<P: Pager> {
     property_store: PropertyStore,
     string_overflow: StringOverflowStore,
     rel_group_store: RelGroupStore,
+    stats: GraphStats,
     tx_active: bool,
 }
 
 impl GraphEngine<FilePager> {
     pub fn create(path: &str, page_size: u32) -> Result<Self, GraphError> {
-        let db = GraphDatabase::create(path, page_size)?;
+        let mut db = GraphDatabase::create(path, page_size)?;
         let ps = db.page_size() as usize;
-        let h = db.header();
 
+        db.pager().begin_write()?;
+        let (stats_pgno, mut stats_page) = db.pager().alloc_page()?;
+        stats_page.data_mut()?[..].fill(0);
+        db.pager().write_page(&stats_page)?;
+        db.header_mut().stats_page = stats_pgno;
+        let mut header_page = db.pager().get_page(1)?;
+        db.header().write(header_page.data_mut()?)?;
+        db.pager().write_page(&header_page)?;
+        db.pager().commit()?;
+
+        let h = db.header();
         Ok(Self {
             node_store: NodeStore::new(h.node_store_root, ps),
             rel_store: RelStore::new(h.rel_store_root, ps),
@@ -45,16 +57,25 @@ impl GraphEngine<FilePager> {
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
+            stats: GraphStats::new(),
             db,
             tx_active: false,
         })
     }
 
     pub fn open(path: &str) -> Result<Self, GraphError> {
-        let db = GraphDatabase::open(path)?;
+        let mut db = GraphDatabase::open(path)?;
         let ps = db.page_size() as usize;
-        let h = db.header();
+        let stats_page_no = db.header().stats_page;
 
+        let stats = if stats_page_no > 0 {
+            let page = db.pager().get_page(stats_page_no)?;
+            GraphStats::deserialize(page.data()).unwrap_or_default()
+        } else {
+            GraphStats::new()
+        };
+
+        let h = db.header();
         Ok(Self {
             node_store: NodeStore::new(h.node_store_root, ps),
             rel_store: RelStore::new(h.rel_store_root, ps),
@@ -62,6 +83,7 @@ impl GraphEngine<FilePager> {
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
+            stats,
             db,
             tx_active: false,
         })
@@ -69,8 +91,20 @@ impl GraphEngine<FilePager> {
 }
 
 impl<P: Pager> GraphEngine<P> {
-    pub fn from_database(db: GraphDatabase<P>) -> Self {
+    pub fn from_database(mut db: GraphDatabase<P>) -> Self {
         let ps = db.page_size() as usize;
+        let stats_page_no = db.header().stats_page;
+
+        let stats = if stats_page_no > 0 {
+            db.pager()
+                .get_page(stats_page_no)
+                .ok()
+                .and_then(|page| GraphStats::deserialize(page.data()).ok())
+                .unwrap_or_default()
+        } else {
+            GraphStats::new()
+        };
+
         let h = db.header();
         Self {
             node_store: NodeStore::new(h.node_store_root, ps),
@@ -79,6 +113,7 @@ impl<P: Pager> GraphEngine<P> {
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
+            stats,
             db,
             tx_active: false,
         }
@@ -97,6 +132,7 @@ impl<P: Pager> GraphEngine<P> {
         if !self.tx_active {
             return Err(GraphError::NoTransaction);
         }
+        self.persist_stats()?;
         self.flush_header_page()?;
         self.db.pager().commit()?;
         self.tx_active = false;
@@ -110,6 +146,15 @@ impl<P: Pager> GraphEngine<P> {
         self.db.pager().rollback()?;
         self.tx_active = false;
         self.reload_header()?;
+
+        let stats_pgno = self.db.header().stats_page;
+        if stats_pgno > 0 {
+            self.db.pager().begin_read()?;
+            let page = self.db.pager().get_page(stats_pgno)?;
+            self.stats = GraphStats::deserialize(page.data())?;
+        } else {
+            self.stats = GraphStats::new();
+        }
         Ok(())
     }
 
@@ -195,6 +240,8 @@ impl<P: Pager> GraphEngine<P> {
             .create_node(self.db.pager(), node_id, &record)?;
 
         self.db.header_mut().node_count += 1;
+        self.stats.node_count += 1;
+        *self.stats.label_counts.entry(label_id).or_insert(0) += 1;
         self.auto_commit(auto)?;
         Ok(node_id)
     }
@@ -279,6 +326,8 @@ impl<P: Pager> GraphEngine<P> {
             .write_node(self.db.pager(), target_id, &dst_node)?;
 
         self.db.header_mut().edge_count += 1;
+        self.stats.edge_count += 1;
+        *self.stats.rel_type_counts.entry(type_id).or_insert(0) += 1;
         self.auto_commit(auto)?;
 
         Ok(rel_id)
@@ -442,7 +491,11 @@ impl<P: Pager> GraphEngine<P> {
     pub fn explain(&self, cypher: &str) -> Result<String, GraphError> {
         let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
         let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
-        Ok(explain::explain(&plan))
+        Ok(explain::explain_with_costs(&plan, &self.stats))
+    }
+
+    pub fn stats(&self) -> &GraphStats {
+        &self.stats
     }
 
     pub fn get_or_create_prop_key(&mut self, name: &str) -> Result<u16, GraphError> {
@@ -721,6 +774,7 @@ impl<P: Pager> GraphEngine<P> {
             return Ok(());
         }
 
+        let type_id = rel.type_token_id;
         let src_id = self.addr_to_node_id(rel.source_node);
         let dst_id = self.addr_to_node_id(rel.target_node);
         let rel_addr = self.rel_store.address(rel_id);
@@ -745,6 +799,10 @@ impl<P: Pager> GraphEngine<P> {
         }
 
         self.db.header_mut().edge_count = self.db.header().edge_count.saturating_sub(1);
+        self.stats.edge_count = self.stats.edge_count.saturating_sub(1);
+        if let Some(c) = self.stats.rel_type_counts.get_mut(&type_id) {
+            *c = c.saturating_sub(1);
+        }
         self.auto_commit(auto)
     }
 
@@ -757,6 +815,7 @@ impl<P: Pager> GraphEngine<P> {
             return Ok(());
         }
 
+        let label_id = node.label_token_id;
         let node_addr = self.node_store.address(node_id);
         let mut rel_ids_to_delete = Vec::new();
         let mut current = node.first_rel;
@@ -784,6 +843,10 @@ impl<P: Pager> GraphEngine<P> {
 
         self.node_store.delete_node(self.db.pager(), node_id)?;
         self.db.header_mut().node_count = self.db.header().node_count.saturating_sub(1);
+        self.stats.node_count = self.stats.node_count.saturating_sub(1);
+        if let Some(c) = self.stats.label_counts.get_mut(&label_id) {
+            *c = c.saturating_sub(1);
+        }
         self.auto_commit(auto)
     }
 
@@ -1001,7 +1064,20 @@ impl<P: Pager> GraphEngine<P> {
         page_offset * rpp + addr.slot as u64
     }
 
+    fn persist_stats(&mut self) -> Result<(), GraphError> {
+        let stats_pgno = self.db.header().stats_page;
+        if stats_pgno > 0 {
+            let mut page = self.db.pager().get_page(stats_pgno)?;
+            let data = page.data_mut()?;
+            data.fill(0);
+            self.stats.serialize(data)?;
+            self.db.pager().write_page(&page)?;
+        }
+        Ok(())
+    }
+
     fn flush_and_commit(&mut self) -> Result<(), GraphError> {
+        self.persist_stats()?;
         let mut header_page = self.db.pager().get_page(1)?;
         self.db.header().write(header_page.data_mut()?)?;
         self.db.pager().write_page(&header_page)?;
@@ -1930,5 +2006,185 @@ mod tests {
 
         let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
         assert_eq!(neighbors.len(), 2);
+    }
+
+    #[test]
+    fn test_stats_tracking() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..10 {
+            engine.create_node("Person").unwrap();
+        }
+        for _ in 0..5 {
+            engine.create_node("City").unwrap();
+        }
+
+        let stats = engine.stats();
+        assert_eq!(stats.node_count, 15);
+
+        let person_label = engine.get_node(0).unwrap().label_token_id;
+        let city_label = engine.get_node(10).unwrap().label_token_id;
+        assert_eq!(engine.stats().label_counts.get(&person_label), Some(&10));
+        assert_eq!(engine.stats().label_counts.get(&city_label), Some(&5));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_after_delete() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..5 {
+            engine.create_node("Person").unwrap();
+        }
+
+        let label_id = engine.get_node(0).unwrap().label_token_id;
+        assert_eq!(engine.stats().label_counts.get(&label_id), Some(&5));
+        assert_eq!(engine.stats().node_count, 5);
+
+        engine.detach_delete_node(0).unwrap();
+        engine.detach_delete_node(1).unwrap();
+
+        assert_eq!(engine.stats().node_count, 3);
+        assert_eq!(engine.stats().label_counts.get(&label_id), Some(&3));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_persistence() {
+        let path = temp_path();
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            for _ in 0..10 {
+                engine.create_node("Person").unwrap();
+            }
+            for _ in 0..5 {
+                engine.create_node("City").unwrap();
+            }
+        }
+
+        {
+            let engine = GraphEngine::open(&path).unwrap();
+            let stats = engine.stats();
+            assert_eq!(stats.node_count, 15);
+            assert_eq!(stats.label_counts.values().sum::<u64>(), 15);
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_avg_degree() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..10 {
+            engine.create_node("Node").unwrap();
+        }
+        for i in 0..10u64 {
+            engine
+                .create_relationship(i, (i + 1) % 10, "LINK")
+                .unwrap();
+            engine
+                .create_relationship(i, (i + 2) % 10, "LINK")
+                .unwrap();
+        }
+
+        assert_eq!(engine.stats().node_count, 10);
+        assert_eq!(engine.stats().edge_count, 20);
+        assert!((engine.stats().avg_degree() - 2.0).abs() < f64::EPSILON);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_cost_estimate_node_scan() {
+        use crate::cypher::cost;
+        use crate::cypher::planner::PlanStep;
+
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..100 {
+            engine.create_node("Person").unwrap();
+        }
+
+        let person_label_id = engine.get_node(0).unwrap().label_token_id;
+        let step = PlanStep::NodeScan {
+            variable: "a".into(),
+            label: Some("Person".into()),
+            properties: vec![],
+            optional: false,
+        };
+
+        let est = cost::estimate_step_cost_with_label_id(&step, engine.stats(), Some(person_label_id));
+        assert!((est.estimated_cost - 100.0).abs() < f64::EPSILON);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_cost_estimate_expand() {
+        use crate::cypher::cost;
+        use crate::cypher::planner::PlanStep;
+
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..100 {
+            engine.create_node("Node").unwrap();
+        }
+        for i in 0..100u64 {
+            engine
+                .create_relationship(i, (i + 1) % 100, "LINK")
+                .unwrap();
+            engine
+                .create_relationship(i, (i + 2) % 100, "LINK")
+                .unwrap();
+        }
+
+        let step = PlanStep::Expand {
+            from_var: "a".into(),
+            rel_var: None,
+            to_var: "b".into(),
+            rel_type: None,
+            direction: Direction::Outgoing,
+            min_hops: None,
+            max_hops: None,
+            optional: false,
+        };
+
+        let est = cost::estimate_step_cost(&step, engine.stats());
+        assert!((est.estimated_cost - 2.0).abs() < f64::EPSILON);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_page_roundtrip() {
+        use crate::storage::stats::GraphStats;
+
+        let mut stats = GraphStats::new();
+        stats.node_count = 500;
+        stats.edge_count = 1200;
+        stats.label_counts.insert(0, 200);
+        stats.label_counts.insert(1, 300);
+        stats.rel_type_counts.insert(0, 800);
+        stats.rel_type_counts.insert(1, 400);
+
+        let mut buf = vec![0u8; 4096];
+        stats.serialize(&mut buf).unwrap();
+
+        let restored = GraphStats::deserialize(&buf).unwrap();
+        assert_eq!(stats, restored);
     }
 }

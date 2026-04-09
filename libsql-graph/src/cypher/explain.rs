@@ -1,4 +1,6 @@
+use crate::cypher::cost;
 use crate::cypher::planner::{PlanStep, QueryPlan};
+use crate::storage::stats::GraphStats;
 
 pub fn explain(plan: &QueryPlan) -> String {
     let mut lines = Vec::new();
@@ -11,6 +13,30 @@ pub fn explain(plan: &QueryPlan) -> String {
             "├─"
         };
         lines.push(format!("{} {}", prefix, format_step(step)));
+    }
+
+    lines.join("\n")
+}
+
+pub fn explain_with_costs(plan: &QueryPlan, stats: &GraphStats) -> String {
+    let mut lines = Vec::new();
+    let total_cost = cost::estimate_plan_cost(&plan.steps, stats);
+    lines.push(format!("Query Plan (est. cost: {total_cost:.1}):"));
+
+    for (i, step) in plan.steps.iter().enumerate() {
+        let prefix = if i == plan.steps.len() - 1 {
+            "└─"
+        } else {
+            "├─"
+        };
+        let est = cost::estimate_step_cost(step, stats);
+        lines.push(format!(
+            "{} {} [rows: {:.1}, cost: {:.1}]",
+            prefix,
+            format_step(step),
+            est.estimated_rows,
+            est.estimated_cost,
+        ));
     }
 
     lines.join("\n")
