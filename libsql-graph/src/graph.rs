@@ -1,0 +1,2841 @@
+use std::collections::HashMap;
+
+use crate::cypher::executor::{self, QueryResult, Value};
+use crate::cypher::explain;
+use crate::cypher::{optimizer, parser, planner};
+use crate::error::GraphError;
+use crate::storage::database::GraphDatabase;
+use crate::storage::pager::Pager;
+use crate::storage::pager_bridge::FilePager;
+use crate::storage::node_store::{NodeRecord, NodeStore};
+use crate::storage::property_store::{
+    PropertyBlock, PropertyRecord, PropertyStore, PropertyValue,
+};
+use crate::storage::record::RecordAddress;
+use crate::storage::rel_store::{RelRecord, RelStore};
+use crate::storage::dense::RelGroupStore;
+use crate::storage::label_index::LabelIndex;
+use crate::storage::stats::GraphStats;
+use crate::storage::string_overflow::StringOverflowStore;
+use crate::storage::token_store::{
+    TokenRecord, TokenStore, TOKEN_KIND_LABEL, TOKEN_KIND_PROPERTY, TOKEN_KIND_REL_TYPE,
+};
+
+pub type DefaultGraphEngine = GraphEngine<FilePager>;
+
+fn serialize_label_index_roots(map: &HashMap<u32, u32>, buf: &mut [u8]) -> usize {
+    let count = map.len() as u32;
+    buf[0..4].copy_from_slice(&count.to_le_bytes());
+    let mut pos = 4;
+    for (&k, &v) in map {
+        buf[pos..pos + 4].copy_from_slice(&k.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&v.to_le_bytes());
+        pos += 4;
+    }
+    pos
+}
+
+fn deserialize_label_index_roots(buf: &[u8]) -> HashMap<u32, u32> {
+    if buf.len() < 4 {
+        return HashMap::new();
+    }
+    let count = u32::from_le_bytes(buf[0..4].try_into().unwrap_or([0; 4])) as usize;
+    if count > 10_000 || buf.len() < 4 + count * 8 {
+        return HashMap::new();
+    }
+    let mut map = HashMap::with_capacity(count);
+    let mut pos = 4;
+    for _ in 0..count {
+        let k = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap_or([0; 4]));
+        pos += 4;
+        let v = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap_or([0; 4]));
+        pos += 4;
+        map.insert(k, v);
+    }
+    map
+}
+
+pub struct GraphEngine<P: Pager> {
+    db: GraphDatabase<P>,
+    node_store: NodeStore,
+    rel_store: RelStore,
+    token_store: TokenStore,
+    property_store: PropertyStore,
+    string_overflow: StringOverflowStore,
+    rel_group_store: RelGroupStore,
+    label_index: LabelIndex,
+    label_index_roots: HashMap<u32, u32>,
+    label_index_dirty: Vec<(u32, u64, bool)>,
+    stats: GraphStats,
+    tx_active: bool,
+}
+
+impl GraphEngine<FilePager> {
+    pub fn create(path: &str, page_size: u32) -> Result<Self, GraphError> {
+        let mut db = GraphDatabase::create(path, page_size)?;
+        let ps = db.page_size() as usize;
+
+        db.pager().begin_write()?;
+        let (stats_pgno, mut stats_page) = db.pager().alloc_page()?;
+        stats_page.data_mut()?[..].fill(0);
+        db.pager().write_page(&stats_page)?;
+        db.header_mut().stats_page = stats_pgno;
+
+        let (li_pgno, mut li_page) = db.pager().alloc_page()?;
+        li_page.data_mut()?[..].fill(0);
+        db.pager().write_page(&li_page)?;
+        db.header_mut().label_index_page = li_pgno;
+
+        let mut header_page = db.pager().get_page(1)?;
+        db.header().write(header_page.data_mut()?)?;
+        db.pager().write_page(&header_page)?;
+        db.pager().commit()?;
+
+        let h = db.header();
+        Ok(Self {
+            node_store: NodeStore::new(h.node_store_root, ps),
+            rel_store: RelStore::new(h.rel_store_root, ps),
+            token_store: TokenStore::new(h.token_store_root, ps),
+            property_store: PropertyStore::new(h.prop_store_root, ps),
+            string_overflow: StringOverflowStore::new(ps),
+            rel_group_store: RelGroupStore::new(ps),
+            label_index: LabelIndex::new(ps),
+            label_index_roots: HashMap::new(),
+            label_index_dirty: Vec::new(),
+            stats: GraphStats::new(),
+            db,
+            tx_active: false,
+        })
+    }
+
+    pub fn open(path: &str) -> Result<Self, GraphError> {
+        let mut db = GraphDatabase::open(path)?;
+        let ps = db.page_size() as usize;
+        let stats_page_no = db.header().stats_page;
+
+        let stats = if stats_page_no > 0 {
+            let page = db.pager().get_page(stats_page_no)?;
+            GraphStats::deserialize(page.data()).unwrap_or_default()
+        } else {
+            GraphStats::new()
+        };
+
+        let li_pgno = db.header().label_index_page;
+        let label_index_roots = if li_pgno > 0 {
+            let page = db.pager().get_page(li_pgno)?;
+            deserialize_label_index_roots(page.data())
+        } else {
+            HashMap::new()
+        };
+
+        let h = db.header();
+        Ok(Self {
+            node_store: NodeStore::new(h.node_store_root, ps),
+            rel_store: RelStore::new(h.rel_store_root, ps),
+            token_store: TokenStore::new(h.token_store_root, ps),
+            property_store: PropertyStore::new(h.prop_store_root, ps),
+            string_overflow: StringOverflowStore::new(ps),
+            rel_group_store: RelGroupStore::new(ps),
+            label_index: LabelIndex::new(ps),
+            label_index_roots,
+            label_index_dirty: Vec::new(),
+            stats,
+            db,
+            tx_active: false,
+        })
+    }
+}
+
+impl<P: Pager> GraphEngine<P> {
+    pub fn from_database(mut db: GraphDatabase<P>) -> Self {
+        let ps = db.page_size() as usize;
+        let stats_page_no = db.header().stats_page;
+
+        let stats = if stats_page_no > 0 {
+            db.pager()
+                .get_page(stats_page_no)
+                .ok()
+                .and_then(|page| GraphStats::deserialize(page.data()).ok())
+                .unwrap_or_default()
+        } else {
+            GraphStats::new()
+        };
+
+        let li_pgno = db.header().label_index_page;
+        let label_index_roots = if li_pgno > 0 {
+            db.pager()
+                .get_page(li_pgno)
+                .ok()
+                .map(|page| deserialize_label_index_roots(page.data()))
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
+        let h = db.header();
+        Self {
+            node_store: NodeStore::new(h.node_store_root, ps),
+            rel_store: RelStore::new(h.rel_store_root, ps),
+            token_store: TokenStore::new(h.token_store_root, ps),
+            property_store: PropertyStore::new(h.prop_store_root, ps),
+            string_overflow: StringOverflowStore::new(ps),
+            rel_group_store: RelGroupStore::new(ps),
+            label_index: LabelIndex::new(ps),
+            label_index_roots,
+            label_index_dirty: Vec::new(),
+            stats,
+            db,
+            tx_active: false,
+        }
+    }
+
+    pub fn begin(&mut self) -> Result<(), GraphError> {
+        if self.tx_active {
+            return Err(GraphError::TransactionActive);
+        }
+        self.db.pager().begin_write()?;
+        self.tx_active = true;
+        Ok(())
+    }
+
+    pub fn commit(&mut self) -> Result<(), GraphError> {
+        if !self.tx_active {
+            return Err(GraphError::NoTransaction);
+        }
+        self.persist_stats()?;
+        self.flush_header_page()?;
+        self.db.pager().commit()?;
+        self.tx_active = false;
+        Ok(())
+    }
+
+    pub fn rollback(&mut self) -> Result<(), GraphError> {
+        if !self.tx_active {
+            return Err(GraphError::NoTransaction);
+        }
+        self.db.pager().rollback()?;
+        self.tx_active = false;
+        self.reload_header()?;
+
+        let stats_pgno = self.db.header().stats_page;
+        if stats_pgno > 0 {
+            self.db.pager().begin_read()?;
+            let page = self.db.pager().get_page(stats_pgno)?;
+            self.stats = GraphStats::deserialize(page.data())?;
+        } else {
+            self.stats = GraphStats::new();
+        }
+
+        let li_pgno = self.db.header().label_index_page;
+        if li_pgno > 0 {
+            let page = self.db.pager().get_page(li_pgno)?;
+            self.label_index_roots = deserialize_label_index_roots(page.data());
+        } else {
+            self.label_index_roots = HashMap::new();
+        }
+        self.label_index_dirty.clear();
+        Ok(())
+    }
+
+    pub fn in_transaction(&self) -> bool {
+        self.tx_active
+    }
+
+    fn reload_header(&mut self) -> Result<(), GraphError> {
+        self.db.pager().begin_read()?;
+        let page = self.db.pager().get_page(1)?;
+        let header = crate::storage::header::GraphHeader::read(page.data())?;
+        *self.db.header_mut() = header;
+        Ok(())
+    }
+
+    fn flush_header_page(&mut self) -> Result<(), GraphError> {
+        let mut header_page = self.db.pager().get_page(1)?;
+        self.db.header().write(header_page.data_mut()?)?;
+        self.db.pager().write_page(&header_page)?;
+        Ok(())
+    }
+
+    fn auto_begin(&mut self) -> Result<bool, GraphError> {
+        if self.tx_active {
+            return Ok(false);
+        }
+        self.db.pager().begin_write()?;
+        self.tx_active = true;
+        Ok(true)
+    }
+
+    fn auto_commit(&mut self, auto: bool) -> Result<(), GraphError> {
+        if auto {
+            self.flush_and_commit()?;
+            self.tx_active = false;
+        }
+        Ok(())
+    }
+
+    pub fn get_or_create_label(&mut self, name: &str) -> Result<u32, GraphError> {
+        let next = self.db.header().next_token_id;
+        if let Some(id) = self.token_store.find_by_name(
+            self.db.pager(),
+            name,
+            TOKEN_KIND_LABEL,
+            next,
+        )? {
+            return Ok(id);
+        }
+
+        let id = self.db.next_token_id();
+        let record = TokenRecord::new(id, TOKEN_KIND_LABEL, name);
+        self.token_store.create_token(self.db.pager(), &record)?;
+        self.db.header_mut().label_count += 1;
+        Ok(id)
+    }
+
+    pub fn get_or_create_rel_type(&mut self, name: &str) -> Result<u32, GraphError> {
+        let next = self.db.header().next_token_id;
+        if let Some(id) = self.token_store.find_by_name(
+            self.db.pager(),
+            name,
+            TOKEN_KIND_REL_TYPE,
+            next,
+        )? {
+            return Ok(id);
+        }
+
+        let id = self.db.next_token_id();
+        let record = TokenRecord::new(id, TOKEN_KIND_REL_TYPE, name);
+        self.token_store.create_token(self.db.pager(), &record)?;
+        self.db.header_mut().rel_type_count += 1;
+        Ok(id)
+    }
+
+    pub fn create_node(&mut self, label: &str) -> Result<u64, GraphError> {
+        let auto = self.auto_begin()?;
+
+        let label_id = self.get_or_create_label(label)?;
+        let node_id = self.db.next_node_id();
+        let record = NodeRecord::new(label_id);
+        self.node_store
+            .create_node(self.db.pager(), node_id, &record)?;
+
+        self.label_index_dirty.push((label_id, node_id, true));
+
+        self.db.header_mut().node_count += 1;
+        self.stats.node_count += 1;
+        *self.stats.label_counts.entry(label_id).or_insert(0) += 1;
+        self.auto_commit(auto)?;
+        Ok(node_id)
+    }
+
+    pub fn get_node(&mut self, node_id: u64) -> Result<NodeRecord, GraphError> {
+        self.node_store.read_node(self.db.pager(), node_id)
+    }
+
+    pub fn create_relationship(
+        &mut self,
+        source_id: u64,
+        target_id: u64,
+        rel_type: &str,
+    ) -> Result<u64, GraphError> {
+        let auto = self.auto_begin()?;
+
+        let type_id = self.get_or_create_rel_type(rel_type)?;
+        let rel_id = self.db.next_rel_id();
+
+        let src_addr = self.node_store.address(source_id);
+        let dst_addr = self.node_store.address(target_id);
+
+        let mut src_node = self.node_store.read_node(self.db.pager(), source_id)?;
+        let mut dst_node = self.node_store.read_node(self.db.pager(), target_id)?;
+
+        let mut rel = RelRecord::new(type_id, src_addr, dst_addr);
+
+        if src_node.first_rel.is_null() {
+            rel.set_first_in_src(true);
+        } else {
+            rel.src_next_rel = src_node.first_rel;
+            rel.set_first_in_src(true);
+        }
+
+        if dst_node.first_rel.is_null() {
+            rel.set_first_in_dst(true);
+        } else {
+            rel.dst_next_rel = dst_node.first_rel;
+            rel.set_first_in_dst(true);
+        }
+
+        let rel_addr = self.rel_store.create_rel(self.db.pager(), rel_id, &rel)?;
+
+        if !src_node.first_rel.is_null() {
+            let mut old_head = self
+                .rel_store
+                .read_rel_at(self.db.pager(), src_node.first_rel)?;
+            if old_head.source_node == src_addr {
+                old_head.src_prev_rel = rel_addr;
+                old_head.set_first_in_src(false);
+            } else {
+                old_head.dst_prev_rel = rel_addr;
+                old_head.set_first_in_dst(false);
+            }
+            self.rel_store
+                .write_rel_at(self.db.pager(), src_node.first_rel, &old_head)?;
+        }
+
+        if !dst_node.first_rel.is_null() && dst_node.first_rel != src_node.first_rel {
+            let mut old_head = self
+                .rel_store
+                .read_rel_at(self.db.pager(), dst_node.first_rel)?;
+            if old_head.target_node == dst_addr {
+                old_head.dst_prev_rel = rel_addr;
+                old_head.set_first_in_dst(false);
+            } else {
+                old_head.src_prev_rel = rel_addr;
+                old_head.set_first_in_src(false);
+            }
+            self.rel_store
+                .write_rel_at(self.db.pager(), dst_node.first_rel, &old_head)?;
+        }
+
+        src_node.first_rel = rel_addr;
+        src_node.rel_count = src_node.rel_count.saturating_add(1);
+        self.node_store
+            .write_node(self.db.pager(), source_id, &src_node)?;
+
+        dst_node.first_rel = rel_addr;
+        dst_node.rel_count = dst_node.rel_count.saturating_add(1);
+        self.node_store
+            .write_node(self.db.pager(), target_id, &dst_node)?;
+
+        self.db.header_mut().edge_count += 1;
+        self.stats.edge_count += 1;
+        *self.stats.rel_type_counts.entry(type_id).or_insert(0) += 1;
+        self.auto_commit(auto)?;
+
+        Ok(rel_id)
+    }
+
+    pub fn get_neighbors(
+        &mut self,
+        node_id: u64,
+        direction: Direction,
+    ) -> Result<Vec<(u64, RecordAddress)>, GraphError> {
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if !node.in_use() {
+            return Ok(vec![]);
+        }
+
+        if node.is_dense() {
+            return self.get_neighbors_dense(node_id, &node, direction);
+        }
+
+        let node_addr = self.node_store.address(node_id);
+        let mut neighbors = Vec::new();
+        let mut current = node.first_rel;
+
+        while !current.is_null() {
+            let rel = self.rel_store.read_rel_at(self.db.pager(), current)?;
+            if !rel.in_use() {
+                break;
+            }
+
+            let is_source = rel.source_node == node_addr;
+            let is_target = rel.target_node == node_addr;
+
+            match direction {
+                Direction::Outgoing if is_source => {
+                    neighbors.push((self.addr_to_node_id(rel.target_node), current));
+                }
+                Direction::Incoming if is_target => {
+                    neighbors.push((self.addr_to_node_id(rel.source_node), current));
+                }
+                Direction::Both => {
+                    if is_source {
+                        neighbors.push((self.addr_to_node_id(rel.target_node), current));
+                    }
+                    if is_target && rel.source_node != rel.target_node {
+                        neighbors.push((self.addr_to_node_id(rel.source_node), current));
+                    }
+                }
+                _ => {}
+            }
+
+            if is_source {
+                current = rel.src_next_rel;
+            } else {
+                current = rel.dst_next_rel;
+            }
+        }
+
+        Ok(neighbors)
+    }
+
+    fn get_neighbors_dense(
+        &mut self,
+        node_id: u64,
+        node: &crate::storage::node_store::NodeRecord,
+        direction: Direction,
+    ) -> Result<Vec<(u64, RecordAddress)>, GraphError> {
+        let node_addr = self.node_store.address(node_id);
+        let groups = self.rel_group_store.iter_groups(self.db.pager(), node.first_rel)?;
+        let mut neighbors = Vec::new();
+
+        for (_, group) in &groups {
+            let chain_starts: Vec<RecordAddress> = match direction {
+                Direction::Outgoing => vec![group.out_first_rel, group.loop_first_rel],
+                Direction::Incoming => vec![group.in_first_rel, group.loop_first_rel],
+                Direction::Both => vec![group.out_first_rel, group.in_first_rel, group.loop_first_rel],
+            };
+            let chain_starts: Vec<RecordAddress> = chain_starts
+                .into_iter()
+                .filter(|a| !a.is_null())
+                .collect();
+
+            for start in chain_starts {
+                let mut current = start;
+                while !current.is_null() {
+                    let rel = self.rel_store.read_rel_at(self.db.pager(), current)?;
+                    if !rel.in_use() {
+                        break;
+                    }
+
+                    let is_source = rel.source_node == node_addr;
+
+                    if rel.type_token_id == group.type_token_id {
+                        if is_source {
+                            neighbors.push((self.addr_to_node_id(rel.target_node), current));
+                        } else {
+                            neighbors.push((self.addr_to_node_id(rel.source_node), current));
+                        }
+                    }
+
+                    current = if is_source {
+                        rel.src_next_rel
+                    } else {
+                        rel.dst_next_rel
+                    };
+                }
+            }
+        }
+
+        Ok(neighbors)
+    }
+
+    pub fn node_count(&self) -> u64 {
+        self.db.header().node_count
+    }
+
+    pub fn edge_count(&self) -> u64 {
+        self.db.header().edge_count
+    }
+
+    pub fn label_index_roots(&mut self) -> HashMap<u32, u32> {
+        if (!self.label_index_dirty.is_empty() || self.label_index_roots.is_empty())
+            && self.db.header().next_node_id > 0
+        {
+            let _ = self.rebuild_label_index_pages();
+        }
+        self.label_index_roots.clone()
+    }
+
+    pub fn label_name_to_id(&mut self) -> HashMap<String, u32> {
+        let mut map = HashMap::new();
+        let next_token = self.db.header().next_token_id;
+        for id in 0..next_token {
+            if let Ok(token) = self.token_store.read_token(self.db.pager(), id) {
+                if token.in_use() && token.kind() == 0 {
+                    map.insert(token.name_str().to_string(), id);
+                }
+            }
+        }
+        map
+    }
+
+    fn optimize_plan(&mut self, plan: crate::cypher::planner::QueryPlan) -> crate::cypher::planner::QueryPlan {
+        let roots = self.label_index_roots();
+        let names = self.label_name_to_id();
+        optimizer::optimize(plan, &self.stats, &roots, &names)
+    }
+
+    pub fn query(&mut self, cypher: &str) -> Result<QueryResult, GraphError> {
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
+        executor::execute(self, &plan, &HashMap::new())
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        cypher: &str,
+        params: HashMap<String, Value>,
+    ) -> Result<QueryResult, GraphError> {
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
+        executor::execute(self, &plan, &params)
+    }
+
+    pub fn profile(&mut self, cypher: &str) -> Result<ProfileResult, GraphError> {
+        let start = std::time::Instant::now();
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let parse_time = start.elapsed();
+
+        let plan_start = std::time::Instant::now();
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
+        let plan_time = plan_start.elapsed();
+
+        let plan_text = explain::explain(&plan);
+
+        let exec_start = std::time::Instant::now();
+        let result = executor::execute(self, &plan, &HashMap::new())?;
+        let exec_time = exec_start.elapsed();
+
+        Ok(ProfileResult {
+            result,
+            plan: plan_text,
+            parse_time_us: parse_time.as_micros() as u64,
+            plan_time_us: plan_time.as_micros() as u64,
+            exec_time_us: exec_time.as_micros() as u64,
+            total_time_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
+    pub fn explain(&mut self, cypher: &str) -> Result<String, GraphError> {
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan = self.optimize_plan(plan);
+        Ok(explain::explain_with_costs(&plan, &self.stats))
+    }
+
+    pub fn stats(&self) -> &GraphStats {
+        &self.stats
+    }
+
+    pub fn get_or_create_prop_key(&mut self, name: &str) -> Result<u16, GraphError> {
+        let next = self.db.header().next_token_id;
+        for kind in [TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE, TOKEN_KIND_PROPERTY] {
+            if let Some(id) = self.token_store.find_by_name(
+                self.db.pager(),
+                name,
+                kind,
+                next,
+            )? {
+                return Ok(id as u16);
+            }
+        }
+        let id = self.db.next_token_id();
+        let record = TokenRecord::new(id, TOKEN_KIND_PROPERTY, name);
+        self.token_store.create_token(self.db.pager(), &record)?;
+        Ok(id as u16)
+    }
+
+    fn find_prop_key(&mut self, name: &str) -> Result<Option<u16>, GraphError> {
+        let next = self.db.header().next_token_id;
+        for kind in [TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE, TOKEN_KIND_PROPERTY] {
+            if let Some(id) = self.token_store.find_by_name(
+                self.db.pager(),
+                name,
+                kind,
+                next,
+            )? {
+                return Ok(Some(id as u16));
+            }
+        }
+        Ok(None)
+    }
+
+    fn store_property_value(
+        &mut self,
+        value: PropertyValue,
+    ) -> Result<PropertyValue, GraphError> {
+        match &value {
+            PropertyValue::ShortString(s) if s.len() > crate::storage::property_store::PROP_VALUE_MAX_INLINE => {
+                let addr = self.string_overflow.write_string(self.db.pager(), s)?;
+                Ok(PropertyValue::Overflow(addr))
+            }
+            _ => Ok(value),
+        }
+    }
+
+    fn resolve_property_value(
+        &mut self,
+        value: PropertyValue,
+    ) -> Result<PropertyValue, GraphError> {
+        match value {
+            PropertyValue::Overflow(addr) => {
+                let s = self.string_overflow.read_string(self.db.pager(), addr)?;
+                Ok(PropertyValue::ShortString(s))
+            }
+            other => Ok(other),
+        }
+    }
+
+    pub fn set_node_property(
+        &mut self,
+        node_id: u64,
+        key: &str,
+        value: PropertyValue,
+    ) -> Result<(), GraphError> {
+        let auto = self.auto_begin()?;
+        let value = self.store_property_value(value)?;
+        let key_id = self.get_or_create_prop_key(key)?;
+        let mut node = self.node_store.read_node(self.db.pager(), node_id)?;
+
+        if node.first_prop.is_null() {
+            let prop_id = self.db.next_prop_id();
+            let mut record = PropertyRecord::new();
+            record.add_block(PropertyBlock::new(key_id, &value));
+            let addr = self
+                .property_store
+                .create_record(self.db.pager(), prop_id, &record)?;
+            node.first_prop = addr;
+            self.node_store
+                .write_node(self.db.pager(), node_id, &node)?;
+        } else {
+            let mut current = node.first_prop;
+            let mut prev = RecordAddress::NULL;
+            while !current.is_null() {
+                let mut record = self
+                    .property_store
+                    .read_record(self.db.pager(), current)?;
+                if record.set_block(key_id, PropertyBlock::new(key_id, &value)) {
+                    self.property_store
+                        .write_record(self.db.pager(), current, &record)?;
+                    self.auto_commit(auto)?;
+                    return Ok(());
+                }
+                prev = current;
+                current = record.next_prop;
+            }
+            let prop_id = self.db.next_prop_id();
+            let mut new_record = PropertyRecord::new();
+            new_record.add_block(PropertyBlock::new(key_id, &value));
+            let new_addr = self
+                .property_store
+                .create_record(self.db.pager(), prop_id, &new_record)?;
+            let mut prev_record = self
+                .property_store
+                .read_record(self.db.pager(), prev)?;
+            prev_record.next_prop = new_addr;
+            self.property_store
+                .write_record(self.db.pager(), prev, &prev_record)?;
+        }
+
+        self.auto_commit(auto)
+    }
+
+    pub fn get_node_property(
+        &mut self,
+        node_id: u64,
+        key: &str,
+    ) -> Result<Option<PropertyValue>, GraphError> {
+        let key_id = match self.find_prop_key(key)? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if node.first_prop.is_null() {
+            return Ok(None);
+        }
+        let raw = self.property_store
+            .get_property(self.db.pager(), node.first_prop, key_id)?;
+        match raw {
+            Some(val) => Ok(Some(self.resolve_property_value(val)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_all_node_properties(
+        &mut self,
+        node_id: u64,
+    ) -> Result<Vec<(String, PropertyValue)>, GraphError> {
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if node.first_prop.is_null() {
+            return Ok(vec![]);
+        }
+        let raw = self
+            .property_store
+            .get_all_properties(self.db.pager(), node.first_prop)?;
+
+        let mut result = Vec::with_capacity(raw.len());
+        for (key_id, val) in raw {
+            let token = self
+                .token_store
+                .read_token(self.db.pager(), key_id as u32)?;
+            let resolved = self.resolve_property_value(val)?;
+            result.push((token.name_str().to_string(), resolved));
+        }
+        Ok(result)
+    }
+
+    pub fn set_rel_property(
+        &mut self,
+        rel_id: u64,
+        key: &str,
+        value_raw: PropertyValue,
+    ) -> Result<(), GraphError> {
+        let auto = self.auto_begin()?;
+        let value = self.store_property_value(value_raw)?;
+        let key_id = self.get_or_create_prop_key(key)?;
+        let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
+
+        if rel.first_prop.is_null() {
+            let prop_id = self.db.next_prop_id();
+            let mut record = PropertyRecord::new();
+            record.add_block(PropertyBlock::new(key_id, &value));
+            let addr = self
+                .property_store
+                .create_record(self.db.pager(), prop_id, &record)?;
+            let mut updated_rel = rel;
+            updated_rel.first_prop = addr;
+            self.rel_store
+                .write_rel(self.db.pager(), rel_id, &updated_rel)?;
+        } else {
+            let mut current = rel.first_prop;
+            let mut prev = RecordAddress::NULL;
+            while !current.is_null() {
+                let mut record = self
+                    .property_store
+                    .read_record(self.db.pager(), current)?;
+                if record.set_block(key_id, PropertyBlock::new(key_id, &value)) {
+                    self.property_store
+                        .write_record(self.db.pager(), current, &record)?;
+                    self.auto_commit(auto)?;
+                    return Ok(());
+                }
+                prev = current;
+                current = record.next_prop;
+            }
+            let prop_id = self.db.next_prop_id();
+            let mut new_record = PropertyRecord::new();
+            new_record.add_block(PropertyBlock::new(key_id, &value));
+            let new_addr = self
+                .property_store
+                .create_record(self.db.pager(), prop_id, &new_record)?;
+            let mut prev_record = self
+                .property_store
+                .read_record(self.db.pager(), prev)?;
+            prev_record.next_prop = new_addr;
+            self.property_store
+                .write_record(self.db.pager(), prev, &prev_record)?;
+        }
+
+        self.auto_commit(auto)
+    }
+
+    pub fn get_rel_property(
+        &mut self,
+        rel_id: u64,
+        key: &str,
+    ) -> Result<Option<PropertyValue>, GraphError> {
+        let key_id = match self.find_prop_key(key)? {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+
+        let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
+        if rel.first_prop.is_null() {
+            return Ok(None);
+        }
+        let raw = self.property_store
+            .get_property(self.db.pager(), rel.first_prop, key_id)?;
+        match raw {
+            Some(val) => Ok(Some(self.resolve_property_value(val)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn get_rel(&mut self, rel_id: u64) -> Result<RelRecord, GraphError> {
+        self.rel_store.read_rel(self.db.pager(), rel_id)
+    }
+
+    pub fn get_rel_type_name(&mut self, type_token_id: u32) -> Result<String, GraphError> {
+        let token = self
+            .token_store
+            .read_token(self.db.pager(), type_token_id)?;
+        Ok(token.name_str().to_string())
+    }
+
+    pub fn delete_relationship(&mut self, rel_id: u64) -> Result<(), GraphError> {
+        let auto = self.auto_begin()?;
+
+        let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
+        if !rel.in_use() {
+            self.auto_commit(auto)?;
+            return Ok(());
+        }
+
+        let type_id = rel.type_token_id;
+        let src_id = self.addr_to_node_id(rel.source_node);
+        let dst_id = self.addr_to_node_id(rel.target_node);
+        let rel_addr = self.rel_store.address(rel_id);
+
+        self.unlink_rel_from_chain(rel_addr, &rel, rel.source_node, true)?;
+        if rel.source_node != rel.target_node {
+            self.unlink_rel_from_chain(rel_addr, &rel, rel.target_node, false)?;
+        }
+
+        self.rel_store.delete_rel(self.db.pager(), rel_id)?;
+
+        let mut src_node = self.node_store.read_node(self.db.pager(), src_id)?;
+        src_node.rel_count = src_node.rel_count.saturating_sub(1);
+        self.node_store
+            .write_node(self.db.pager(), src_id, &src_node)?;
+
+        if rel.source_node != rel.target_node {
+            let mut dst_node = self.node_store.read_node(self.db.pager(), dst_id)?;
+            dst_node.rel_count = dst_node.rel_count.saturating_sub(1);
+            self.node_store
+                .write_node(self.db.pager(), dst_id, &dst_node)?;
+        }
+
+        self.db.header_mut().edge_count = self.db.header().edge_count.saturating_sub(1);
+        self.stats.edge_count = self.stats.edge_count.saturating_sub(1);
+        if let Some(c) = self.stats.rel_type_counts.get_mut(&type_id) {
+            *c = c.saturating_sub(1);
+        }
+        self.auto_commit(auto)
+    }
+
+    pub fn detach_delete_node(&mut self, node_id: u64) -> Result<(), GraphError> {
+        let auto = self.auto_begin()?;
+
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if !node.in_use() {
+            self.auto_commit(auto)?;
+            return Ok(());
+        }
+
+        let label_id = node.label_token_id;
+        self.label_index_dirty.push((label_id, node_id, false));
+        let node_addr = self.node_store.address(node_id);
+        let mut rel_ids_to_delete = Vec::new();
+        let mut current = node.first_rel;
+        while !current.is_null() {
+            let rel = self.rel_store.read_rel_at(self.db.pager(), current)?;
+            if !rel.in_use() {
+                break;
+            }
+            let is_source = rel.source_node == node_addr;
+            let rpp = self.rel_store.records_per_page() as u64;
+            let rel_id = (current.page - self.db.header().rel_store_root) as u64 * rpp
+                + current.slot as u64;
+            rel_ids_to_delete.push(rel_id);
+
+            current = if is_source {
+                rel.src_next_rel
+            } else {
+                rel.dst_next_rel
+            };
+        }
+
+        for rel_id in rel_ids_to_delete {
+            self.delete_relationship(rel_id)?;
+        }
+
+        self.node_store.delete_node(self.db.pager(), node_id)?;
+        self.db.header_mut().node_count = self.db.header().node_count.saturating_sub(1);
+        self.stats.node_count = self.stats.node_count.saturating_sub(1);
+        if let Some(c) = self.stats.label_counts.get_mut(&label_id) {
+            *c = c.saturating_sub(1);
+        }
+        self.auto_commit(auto)
+    }
+
+    pub fn get_label_name(&mut self, label_token_id: u32) -> Result<String, GraphError> {
+        let token = self
+            .token_store
+            .read_token(self.db.pager(), label_token_id)?;
+        Ok(token.name_str().to_string())
+    }
+
+    pub fn db(&mut self) -> &mut GraphDatabase<P> {
+        &mut self.db
+    }
+
+    pub fn node_store(&self) -> &NodeStore {
+        &self.node_store
+    }
+
+    pub fn rel_store(&self) -> &RelStore {
+        &self.rel_store
+    }
+
+    pub fn schema(&mut self) -> Result<GraphSchema, GraphError> {
+        let mut labels = Vec::new();
+        let mut rel_types = Vec::new();
+        let next_token = self.db.header().next_token_id;
+
+        for id in 0..next_token {
+            let token = self.token_store.read_token(self.db.pager(), id)?;
+            if !token.in_use() {
+                continue;
+            }
+            let name = token.name_str().to_string();
+            match token.kind() {
+                0 => labels.push(LabelInfo { token_id: id, name }),
+                1 => rel_types.push(RelTypeInfo { token_id: id, name }),
+                _ => {}
+            }
+        }
+
+        Ok(GraphSchema {
+            node_count: self.db.header().node_count,
+            edge_count: self.db.header().edge_count,
+            labels,
+            rel_types,
+        })
+    }
+
+    pub fn property_keys(&mut self) -> Result<Vec<String>, GraphError> {
+        let mut keys = Vec::new();
+        let next_token = self.db.header().next_token_id;
+        for id in 0..next_token {
+            let token = self.token_store.read_token(self.db.pager(), id)?;
+            if token.in_use() {
+                keys.push(token.name_str().to_string());
+            }
+        }
+        Ok(keys)
+    }
+
+    pub fn convert_to_dense(&mut self, node_id: u64) -> Result<(), GraphError> {
+        let auto = self.auto_begin()?;
+
+        let mut node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if node.is_dense() || node.first_rel.is_null() {
+            self.auto_commit(auto)?;
+            return Ok(());
+        }
+
+        let node_addr = self.node_store.address(node_id);
+        type RelChains = (Vec<RecordAddress>, Vec<RecordAddress>, Vec<RecordAddress>);
+        let mut type_chains: std::collections::HashMap<u32, RelChains> =
+            std::collections::HashMap::new();
+
+        let mut current = node.first_rel;
+        while !current.is_null() {
+            let rel = self.rel_store.read_rel_at(self.db.pager(), current)?;
+            if !rel.in_use() {
+                break;
+            }
+
+            let is_source = rel.source_node == node_addr;
+            let is_target = rel.target_node == node_addr;
+            let is_loop = is_source && is_target;
+
+            let entry = type_chains.entry(rel.type_token_id).or_default();
+            if is_loop {
+                entry.2.push(current);
+            } else if is_source {
+                entry.0.push(current);
+            } else if is_target {
+                entry.1.push(current);
+            }
+
+            current = if is_source {
+                rel.src_next_rel
+            } else {
+                rel.dst_next_rel
+            };
+        }
+
+        let mut first_group_addr = RecordAddress::NULL;
+        let mut prev_group_addr = RecordAddress::NULL;
+
+        for (type_token, (out_rels, in_rels, loop_rels)) in &type_chains {
+            let mut group = crate::storage::dense::RelGroupRecord::new(*type_token);
+            group.out_count = out_rels.len() as u32;
+            group.in_count = in_rels.len() as u32;
+            group.loop_count = loop_rels.len() as u32;
+
+            if let Some(first) = out_rels.first() {
+                group.out_first_rel = *first;
+            }
+            if let Some(first) = in_rels.first() {
+                group.in_first_rel = *first;
+            }
+            if let Some(first) = loop_rels.first() {
+                group.loop_first_rel = *first;
+            }
+
+            let group_addr = self.rel_group_store.create_group(self.db.pager(), &group)?;
+
+            if first_group_addr.is_null() {
+                first_group_addr = group_addr;
+            }
+            if !prev_group_addr.is_null() {
+                let mut prev = self.rel_group_store.read_group(self.db.pager(), prev_group_addr)?;
+                prev.next_group = group_addr;
+                self.rel_group_store.write_group(self.db.pager(), prev_group_addr, &prev)?;
+            }
+            prev_group_addr = group_addr;
+        }
+
+        node.first_rel = first_group_addr;
+        node.set_dense(true);
+        self.node_store.write_node(self.db.pager(), node_id, &node)?;
+
+        self.auto_commit(auto)
+    }
+
+    pub fn is_dense(&mut self, node_id: u64) -> Result<bool, GraphError> {
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        Ok(node.is_dense())
+    }
+
+    pub fn get_dense_groups(
+        &mut self,
+        node_id: u64,
+    ) -> Result<Vec<(u32, u32, u32, u32)>, GraphError> {
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if !node.is_dense() {
+            return Ok(vec![]);
+        }
+
+        let groups = self.rel_group_store.iter_groups(self.db.pager(), node.first_rel)?;
+        Ok(groups
+            .into_iter()
+            .map(|(_, g)| (g.type_token_id, g.out_count, g.in_count, g.loop_count))
+            .collect())
+    }
+
+    fn unlink_rel_from_chain(
+        &mut self,
+        rel_addr: RecordAddress,
+        rel: &RelRecord,
+        node_addr: RecordAddress,
+        is_src_chain: bool,
+    ) -> Result<(), GraphError> {
+        let (prev, next) = if is_src_chain {
+            (rel.src_prev_rel, rel.src_next_rel)
+        } else {
+            (rel.dst_prev_rel, rel.dst_next_rel)
+        };
+
+        if !prev.is_null() {
+            let mut prev_rel = self.rel_store.read_rel_at(self.db.pager(), prev)?;
+            let use_src = (is_src_chain && prev_rel.source_node == rel.source_node)
+                || (!is_src_chain && prev_rel.target_node != rel.target_node);
+            if use_src {
+                prev_rel.src_next_rel = next;
+            } else {
+                prev_rel.dst_next_rel = next;
+            }
+            self.rel_store
+                .write_rel_at(self.db.pager(), prev, &prev_rel)?;
+        }
+
+        if !next.is_null() {
+            let mut next_rel = self.rel_store.read_rel_at(self.db.pager(), next)?;
+            let use_src = (is_src_chain && next_rel.source_node == rel.source_node)
+                || (!is_src_chain && next_rel.target_node != rel.target_node);
+            if use_src {
+                next_rel.src_prev_rel = prev;
+            } else {
+                next_rel.dst_prev_rel = prev;
+            }
+            self.rel_store
+                .write_rel_at(self.db.pager(), next, &next_rel)?;
+        }
+
+        let node_id = self.addr_to_node_id(node_addr);
+        let mut node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if node.first_rel == rel_addr {
+            node.first_rel = next;
+            self.node_store
+                .write_node(self.db.pager(), node_id, &node)?;
+        }
+
+        Ok(())
+    }
+
+    fn addr_to_node_id(&self, addr: RecordAddress) -> u64 {
+        let rpp = self.node_store.records_per_page() as u64;
+        let page_offset = (addr.page - self.db.header().node_store_root) as u64;
+        page_offset * rpp + addr.slot as u64
+    }
+
+    fn persist_stats(&mut self) -> Result<(), GraphError> {
+        let stats_pgno = self.db.header().stats_page;
+        if stats_pgno > 0 {
+            let mut page = self.db.pager().get_page(stats_pgno)?;
+            let data = page.data_mut()?;
+            data.fill(0);
+            self.stats.serialize(data)?;
+            self.db.pager().write_page(&page)?;
+        }
+        Ok(())
+    }
+
+    fn rebuild_label_index_pages(&mut self) -> Result<(), GraphError> {
+        self.label_index_dirty.clear();
+
+        let was_active = self.tx_active;
+        if !was_active {
+            self.db.pager().begin_write()?;
+            self.tx_active = true;
+        }
+
+        let max_node = self.db.header().next_node_id;
+        let mut label_nodes: HashMap<u32, Vec<u64>> = HashMap::new();
+        for id in 0..max_node {
+            let node = self.node_store.read_node(self.db.pager(), id)?;
+            if node.in_use() {
+                label_nodes.entry(node.label_token_id).or_default().push(id);
+            }
+        }
+
+        let mut new_roots = HashMap::new();
+        for (&label_id, node_ids) in &label_nodes {
+            let (root, mut p) = self.db.pager().alloc_page()?;
+            p.data_mut()?.fill(0);
+            self.db.pager().write_page(&p)?;
+            for &nid in node_ids {
+                self.label_index.set_label(self.db.pager(), label_id, nid, root)?;
+            }
+            new_roots.insert(label_id, root);
+        }
+        self.label_index_roots = new_roots;
+
+        let mut li_pgno = self.db.header().label_index_page;
+        if li_pgno == 0 && !self.label_index_roots.is_empty() {
+            let (pgno, mut p) = self.db.pager().alloc_page()?;
+            p.data_mut()?[..].fill(0);
+            self.db.pager().write_page(&p)?;
+            li_pgno = pgno;
+            self.db.header_mut().label_index_page = li_pgno;
+        }
+        if li_pgno > 0 {
+            let mut page = self.db.pager().get_page(li_pgno)?;
+            let data = page.data_mut()?;
+            data.fill(0);
+            serialize_label_index_roots(&self.label_index_roots, data);
+            self.db.pager().write_page(&page)?;
+        }
+
+        self.flush_header_page()?;
+
+        if !was_active {
+            self.db.pager().commit()?;
+            self.tx_active = false;
+        }
+        Ok(())
+    }
+
+    fn flush_and_commit(&mut self) -> Result<(), GraphError> {
+        self.persist_stats()?;
+        let mut header_page = self.db.pager().get_page(1)?;
+        self.db.header().write(header_page.data_mut()?)?;
+        self.db.pager().write_page(&header_page)?;
+        self.db.pager().commit()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
+#[derive(Debug, Clone)]
+pub struct GraphSchema {
+    pub node_count: u64,
+    pub edge_count: u64,
+    pub labels: Vec<LabelInfo>,
+    pub rel_types: Vec<RelTypeInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LabelInfo {
+    pub token_id: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RelTypeInfo {
+    pub token_id: u32,
+    pub name: String,
+}
+
+#[derive(Debug)]
+pub struct ProfileResult {
+    pub result: QueryResult,
+    pub plan: String,
+    pub parse_time_us: u64,
+    pub plan_time_us: u64,
+    pub exec_time_us: u64,
+    pub total_time_us: u64,
+}
+
+impl std::fmt::Display for ProfileResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}", self.plan)?;
+        writeln!(f, "Rows: {}", self.result.rows.len())?;
+        writeln!(f, "Parse: {}us", self.parse_time_us)?;
+        writeln!(f, "Plan:  {}us", self.plan_time_us)?;
+        writeln!(f, "Exec:  {}us", self.exec_time_us)?;
+        writeln!(f, "Total: {}us", self.total_time_us)?;
+        if self.result.stats.nodes_created > 0 {
+            writeln!(f, "Nodes created: {}", self.result.stats.nodes_created)?;
+        }
+        if self.result.stats.relationships_created > 0 {
+            writeln!(f, "Rels created: {}", self.result.stats.relationships_created)?;
+        }
+        if self.result.stats.properties_set > 0 {
+            writeln!(f, "Props set: {}", self.result.stats.properties_set)?;
+        }
+        if self.result.stats.nodes_deleted > 0 {
+            writeln!(f, "Nodes deleted: {}", self.result.stats.nodes_deleted)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct TransactionBatch<'a, P: Pager> {
+    engine: &'a mut GraphEngine<P>,
+    queries: Vec<(String, HashMap<String, Value>)>,
+}
+
+impl<'a, P: Pager> TransactionBatch<'a, P> {
+    pub fn new(engine: &'a mut GraphEngine<P>) -> Self {
+        Self {
+            engine,
+            queries: Vec::new(),
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, cypher: &str) -> Self {
+        self.queries.push((cypher.to_string(), HashMap::new()));
+        self
+    }
+
+    pub fn add_with_params(mut self, cypher: &str, params: HashMap<String, Value>) -> Self {
+        self.queries.push((cypher.to_string(), params));
+        self
+    }
+
+    pub fn execute(self) -> Result<Vec<QueryResult>, GraphError> {
+        self.engine.begin()?;
+        let mut results = Vec::with_capacity(self.queries.len());
+        for (cypher, params) in &self.queries {
+            let stmt = match parser::parse(cypher) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = self.engine.rollback();
+                    return Err(GraphError::QueryParse(e));
+                }
+            };
+            let plan = match planner::plan(&stmt) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = self.engine.rollback();
+                    return Err(GraphError::QueryPlan(e));
+                }
+            };
+            let plan = self.engine.optimize_plan(plan);
+            match executor::execute(self.engine, &plan, params) {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    let _ = self.engine.rollback();
+                    return Err(e);
+                }
+            }
+        }
+        self.engine.commit()?;
+        Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn temp_path() -> String {
+        let f = NamedTempFile::new().unwrap();
+        let p = f.path().to_str().unwrap().to_string();
+        drop(f);
+        p
+    }
+
+    #[test]
+    fn test_create_engine() {
+        let path = temp_path();
+        let engine = GraphEngine::create(&path, 4096).unwrap();
+        assert_eq!(engine.node_count(), 0);
+        assert_eq!(engine.edge_count(), 0);
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_create_nodes() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let id0 = engine.create_node("Person").unwrap();
+        let id1 = engine.create_node("Person").unwrap();
+        let id2 = engine.create_node("Company").unwrap();
+
+        assert_eq!(id0, 0);
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(engine.node_count(), 3);
+
+        let n0 = engine.get_node(0).unwrap();
+        let n2 = engine.get_node(2).unwrap();
+        assert!(n0.in_use());
+        assert!(n2.in_use());
+        assert_ne!(n0.label_token_id, n2.label_token_id);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_create_relationship() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let alice = engine.create_node("Person").unwrap();
+        let bob = engine.create_node("Person").unwrap();
+
+        let rel_id = engine.create_relationship(alice, bob, "KNOWS").unwrap();
+        assert_eq!(rel_id, 0);
+        assert_eq!(engine.edge_count(), 1);
+
+        let alice_node = engine.get_node(alice).unwrap();
+        assert_eq!(alice_node.rel_count, 1);
+        assert!(!alice_node.first_rel.is_null());
+
+        let bob_node = engine.get_node(bob).unwrap();
+        assert_eq!(bob_node.rel_count, 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_neighbors_outgoing() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Person").unwrap();
+
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+        engine.create_relationship(a, c, "KNOWS").unwrap();
+
+        let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 2);
+
+        let neighbor_ids: Vec<u64> = neighbors.iter().map(|(id, _)| *id).collect();
+        assert!(neighbor_ids.contains(&b));
+        assert!(neighbor_ids.contains(&c));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_neighbors_incoming() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Person").unwrap();
+
+        engine.create_relationship(a, c, "KNOWS").unwrap();
+        engine.create_relationship(b, c, "KNOWS").unwrap();
+
+        let incoming = engine.get_neighbors(c, Direction::Incoming).unwrap();
+        assert_eq!(incoming.len(), 2);
+
+        let ids: Vec<u64> = incoming.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&a));
+        assert!(ids.contains(&b));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_neighbors_both() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Person").unwrap();
+
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+        engine.create_relationship(c, a, "FOLLOWS").unwrap();
+
+        let both = engine.get_neighbors(a, Direction::Both).unwrap();
+        assert_eq!(both.len(), 2);
+
+        let ids: Vec<u64> = both.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&b));
+        assert!(ids.contains(&c));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_reopen_engine() {
+        let path = temp_path();
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            engine.create_node("Person").unwrap();
+            engine.create_node("Company").unwrap();
+            engine.create_relationship(0, 1, "WORKS_AT").unwrap();
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            assert_eq!(engine.node_count(), 2);
+            assert_eq!(engine.edge_count(), 1);
+
+            let neighbors = engine.get_neighbors(0, Direction::Outgoing).unwrap();
+            assert_eq!(neighbors.len(), 1);
+            assert_eq!(neighbors[0].0, 1);
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_set_and_get_node_property() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        let alice = engine.create_node("Person").unwrap();
+
+        engine
+            .set_node_property(alice, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+        engine
+            .set_node_property(alice, "age", PropertyValue::Int32(28))
+            .unwrap();
+
+        let name = engine.get_node_property(alice, "name").unwrap();
+        assert_eq!(name, Some(PropertyValue::ShortString("Alice".into())));
+
+        let age = engine.get_node_property(alice, "age").unwrap();
+        assert_eq!(age, Some(PropertyValue::Int32(28)));
+
+        let missing = engine.get_node_property(alice, "email").unwrap();
+        assert_eq!(missing, None);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_update_node_property() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        let node = engine.create_node("Person").unwrap();
+
+        engine
+            .set_node_property(node, "age", PropertyValue::Int32(25))
+            .unwrap();
+        engine
+            .set_node_property(node, "age", PropertyValue::Int32(26))
+            .unwrap();
+
+        let age = engine.get_node_property(node, "age").unwrap();
+        assert_eq!(age, Some(PropertyValue::Int32(26)));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_all_node_properties() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        let node = engine.create_node("Person").unwrap();
+
+        engine
+            .set_node_property(node, "name", PropertyValue::ShortString("Bob".into()))
+            .unwrap();
+        engine
+            .set_node_property(node, "active", PropertyValue::Bool(true))
+            .unwrap();
+
+        let props = engine.get_all_node_properties(node).unwrap();
+        assert_eq!(props.len(), 2);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_properties_persist_across_reopen() {
+        let path = temp_path();
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            let node = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(node, "name", PropertyValue::ShortString("Eve".into()))
+                .unwrap();
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            let name = engine.get_node_property(0, "name").unwrap();
+            assert_eq!(name, Some(PropertyValue::ShortString("Eve".into())));
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_delete_relationship() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Person").unwrap();
+
+        let r0 = engine.create_relationship(a, b, "KNOWS").unwrap();
+        let _r1 = engine.create_relationship(a, c, "KNOWS").unwrap();
+        assert_eq!(engine.edge_count(), 2);
+
+        engine.delete_relationship(r0).unwrap();
+        assert_eq!(engine.edge_count(), 1);
+
+        let a_node = engine.get_node(a).unwrap();
+        assert_eq!(a_node.rel_count, 1);
+
+        let b_node = engine.get_node(b).unwrap();
+        assert_eq!(b_node.rel_count, 0);
+
+        let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].0, c);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_delete_only_relationship() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+
+        let r = engine.create_relationship(a, b, "KNOWS").unwrap();
+        engine.delete_relationship(r).unwrap();
+
+        assert_eq!(engine.edge_count(), 0);
+        let a_node = engine.get_node(a).unwrap();
+        assert_eq!(a_node.rel_count, 0);
+        assert!(a_node.first_rel.is_null());
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_detach_delete_node() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Person").unwrap();
+
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+        engine.create_relationship(a, c, "KNOWS").unwrap();
+        engine.create_relationship(b, c, "FRIENDS").unwrap();
+
+        engine.detach_delete_node(a).unwrap();
+
+        assert_eq!(engine.node_count(), 2);
+        assert_eq!(engine.edge_count(), 1);
+
+        let a_node = engine.get_node(a).unwrap();
+        assert!(!a_node.in_use());
+
+        let b_node = engine.get_node(b).unwrap();
+        assert_eq!(b_node.rel_count, 1);
+
+        let c_neighbors = engine.get_neighbors(c, Direction::Both).unwrap();
+        assert_eq!(c_neighbors.len(), 1);
+        assert_eq!(c_neighbors[0].0, b);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_detach_delete_isolated_node() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        engine.detach_delete_node(a).unwrap();
+
+        assert_eq!(engine.node_count(), 0);
+        let a_node = engine.get_node(a).unwrap();
+        assert!(!a_node.in_use());
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_get_label_name() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        let node = engine.create_node("Person").unwrap();
+
+        let label_id = engine.get_node(node).unwrap().label_token_id;
+        let name = engine.get_label_name(label_id).unwrap();
+        assert_eq!(name, "Person");
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_multiple_relationships() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Person").unwrap();
+        let d = engine.create_node("Person").unwrap();
+
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+        engine.create_relationship(a, c, "KNOWS").unwrap();
+        engine.create_relationship(a, d, "KNOWS").unwrap();
+        engine.create_relationship(b, c, "KNOWS").unwrap();
+
+        assert_eq!(engine.edge_count(), 4);
+
+        let a_out = engine.get_neighbors(a, Direction::Outgoing).unwrap();
+        assert_eq!(a_out.len(), 3);
+
+        let b_both = engine.get_neighbors(b, Direction::Both).unwrap();
+        assert_eq!(b_both.len(), 2);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_convert_to_dense() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Hub").unwrap();
+        let mut targets = Vec::new();
+        for _ in 0..10 {
+            targets.push(engine.create_node("Spoke").unwrap());
+        }
+
+        for (i, &t) in targets.iter().enumerate() {
+            if i < 5 {
+                engine.create_relationship(hub, t, "KNOWS").unwrap();
+            } else {
+                engine.create_relationship(hub, t, "FOLLOWS").unwrap();
+            }
+        }
+
+        assert!(!engine.is_dense(hub).unwrap());
+
+        let pre_neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(pre_neighbors.len(), 10);
+
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        let post_neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(post_neighbors.len(), 10);
+
+        let groups = engine.get_dense_groups(hub).unwrap();
+        assert_eq!(groups.len(), 2);
+
+        let total_out: u32 = groups.iter().map(|g| g.1).sum();
+        assert_eq!(total_out, 10);
+        for g in &groups {
+            assert_eq!(g.1, 5);
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dense_node_query_via_cypher() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Person").unwrap();
+        engine
+            .set_node_property(hub, "name", PropertyValue::ShortString("Hub".into()))
+            .unwrap();
+
+        for i in 0..6 {
+            let spoke = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(
+                    spoke,
+                    "name",
+                    PropertyValue::ShortString(format!("S{i}")),
+                )
+                .unwrap();
+            engine.create_relationship(hub, spoke, "KNOWS").unwrap();
+        }
+
+        engine.convert_to_dense(hub).unwrap();
+
+        let result = engine
+            .query("MATCH (a:Person {name: 'Hub'})-[:KNOWS]->(b) RETURN b.name")
+            .unwrap();
+        assert_eq!(result.rows.len(), 6);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dense_node_integrity() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Node").unwrap();
+        for _ in 0..20 {
+            let target = engine.create_node("Node").unwrap();
+            engine.create_relationship(hub, target, "REL").unwrap();
+        }
+        engine.convert_to_dense(hub).unwrap();
+
+        let report = crate::integrity::check_integrity(&mut engine).unwrap();
+        let non_count_errors: Vec<_> = report
+            .errors
+            .iter()
+            .filter(|e| !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. }))
+            .collect();
+        assert!(
+            non_count_errors.is_empty(),
+            "non-count errors: {:?}",
+            non_count_errors
+        );
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dense_already_dense_noop() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Node").unwrap();
+        let target = engine.create_node("Node").unwrap();
+        engine.create_relationship(hub, target, "REL").unwrap();
+
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        let neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_explicit_dense_conversion() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Hub").unwrap();
+        assert!(!engine.is_dense(hub).unwrap());
+
+        for _ in 0..8 {
+            let spoke = engine.create_node("Spoke").unwrap();
+            engine.create_relationship(hub, spoke, "CONN").unwrap();
+        }
+
+        assert!(!engine.is_dense(hub).unwrap());
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        let neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 8);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_profile() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_relationship(0, 1, "KNOWS").unwrap();
+        engine
+            .set_node_property(0, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+
+        let profile = engine
+            .profile("MATCH (a:Person) RETURN a.name")
+            .unwrap();
+        assert!(profile.result.rows.len() >= 1);
+        assert!(profile.plan.contains("NodeScan"));
+        assert!(profile.total_time_us > 0);
+
+        let display = format!("{profile}");
+        assert!(display.contains("Rows:"));
+        assert!(display.contains("Total:"));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_transaction_batch() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let results = TransactionBatch::new(&mut engine)
+            .add("CREATE (a:Person {name: 'Alice'})")
+            .add("CREATE (b:Person {name: 'Bob'})")
+            .execute()
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].stats.nodes_created, 1);
+        assert_eq!(results[1].stats.nodes_created, 1);
+        assert_eq!(engine.node_count(), 2);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_transaction_batch_with_params() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.create_node("Person").unwrap();
+        engine
+            .set_node_property(0, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "name".to_string(),
+            crate::cypher::executor::Value::String("Alice".into()),
+        );
+
+        let results = TransactionBatch::new(&mut engine)
+            .add_with_params("MATCH (a:Person) WHERE a.name = $name RETURN a.name", params)
+            .execute()
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rows.len(), 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_mem_pager_engine() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        engine
+            .set_node_property(a, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+        engine
+            .set_node_property(b, "name", PropertyValue::ShortString("Bob".into()))
+            .unwrap();
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+
+        assert_eq!(engine.node_count(), 2);
+        assert_eq!(engine.edge_count(), 1);
+
+        let result = engine
+            .query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+        assert_eq!(result.rows[0][1], Value::String("Bob".into()));
+
+        let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].0, b);
+    }
+
+    #[test]
+    fn test_explicit_commit() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.commit().unwrap();
+
+        assert_eq!(engine.node_count(), 3);
+        let n = engine.get_node(0).unwrap();
+        assert!(n.in_use());
+        let n = engine.get_node(1).unwrap();
+        assert!(n.in_use());
+        let n = engine.get_node(2).unwrap();
+        assert!(n.in_use());
+    }
+
+    #[test]
+    fn test_explicit_rollback() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.rollback().unwrap();
+
+        assert_eq!(engine.node_count(), 0);
+    }
+
+    #[test]
+    fn test_auto_commit_backward_compat() {
+        let path = temp_path();
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            engine.create_node("Person").unwrap();
+            assert_eq!(engine.node_count(), 1);
+        }
+        {
+            let engine = GraphEngine::open(&path).unwrap();
+            assert_eq!(engine.node_count(), 1);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_rollback_restores_counters() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let initial_next = engine.db.header().next_node_id;
+
+        engine.begin().unwrap();
+        engine.create_node("Person").unwrap();
+        assert_eq!(engine.db.header().next_node_id, initial_next + 1);
+        engine.rollback().unwrap();
+
+        assert_eq!(engine.db.header().next_node_id, initial_next);
+    }
+
+    #[test]
+    fn test_transaction_batch_atomicity() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let result = TransactionBatch::new(&mut engine)
+            .add("CREATE (a:Person {name: 'Alice'})")
+            .add("THIS IS NOT VALID CYPHER")
+            .execute();
+
+        assert!(result.is_err());
+        assert_eq!(engine.node_count(), 0);
+    }
+
+    #[test]
+    fn test_double_begin_error() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+        let err = engine.begin().unwrap_err();
+        assert!(matches!(err, GraphError::TransactionActive));
+        engine.rollback().unwrap();
+    }
+
+    #[test]
+    fn test_commit_without_begin_error() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let err = engine.commit().unwrap_err();
+        assert!(matches!(err, GraphError::NoTransaction));
+    }
+
+    #[test]
+    fn test_mixed_operations_in_transaction() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Company").unwrap();
+
+        engine
+            .set_node_property(a, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+        engine
+            .set_node_property(b, "name", PropertyValue::ShortString("Bob".into()))
+            .unwrap();
+        engine
+            .set_node_property(c, "name", PropertyValue::ShortString("Acme".into()))
+            .unwrap();
+
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+        engine.create_relationship(a, c, "WORKS_AT").unwrap();
+
+        engine.commit().unwrap();
+
+        assert_eq!(engine.node_count(), 3);
+        assert_eq!(engine.edge_count(), 2);
+
+        let name = engine.get_node_property(a, "name").unwrap();
+        assert_eq!(name, Some(PropertyValue::ShortString("Alice".into())));
+
+        let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 2);
+    }
+
+    #[test]
+    fn test_stats_tracking() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..10 {
+            engine.create_node("Person").unwrap();
+        }
+        for _ in 0..5 {
+            engine.create_node("City").unwrap();
+        }
+
+        let stats = engine.stats();
+        assert_eq!(stats.node_count, 15);
+
+        let person_label = engine.get_node(0).unwrap().label_token_id;
+        let city_label = engine.get_node(10).unwrap().label_token_id;
+        assert_eq!(engine.stats().label_counts.get(&person_label), Some(&10));
+        assert_eq!(engine.stats().label_counts.get(&city_label), Some(&5));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_after_delete() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..5 {
+            engine.create_node("Person").unwrap();
+        }
+
+        let label_id = engine.get_node(0).unwrap().label_token_id;
+        assert_eq!(engine.stats().label_counts.get(&label_id), Some(&5));
+        assert_eq!(engine.stats().node_count, 5);
+
+        engine.detach_delete_node(0).unwrap();
+        engine.detach_delete_node(1).unwrap();
+
+        assert_eq!(engine.stats().node_count, 3);
+        assert_eq!(engine.stats().label_counts.get(&label_id), Some(&3));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_persistence() {
+        let path = temp_path();
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            for _ in 0..10 {
+                engine.create_node("Person").unwrap();
+            }
+            for _ in 0..5 {
+                engine.create_node("City").unwrap();
+            }
+        }
+
+        {
+            let engine = GraphEngine::open(&path).unwrap();
+            let stats = engine.stats();
+            assert_eq!(stats.node_count, 15);
+            assert_eq!(stats.label_counts.values().sum::<u64>(), 15);
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_avg_degree() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..10 {
+            engine.create_node("Node").unwrap();
+        }
+        for i in 0..10u64 {
+            engine
+                .create_relationship(i, (i + 1) % 10, "LINK")
+                .unwrap();
+            engine
+                .create_relationship(i, (i + 2) % 10, "LINK")
+                .unwrap();
+        }
+
+        assert_eq!(engine.stats().node_count, 10);
+        assert_eq!(engine.stats().edge_count, 20);
+        assert!((engine.stats().avg_degree() - 2.0).abs() < f64::EPSILON);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_cost_estimate_node_scan() {
+        use crate::cypher::cost;
+        use crate::cypher::planner::PlanStep;
+
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..100 {
+            engine.create_node("Person").unwrap();
+        }
+
+        let person_label_id = engine.get_node(0).unwrap().label_token_id;
+        let step = PlanStep::NodeScan {
+            variable: "a".into(),
+            label: Some("Person".into()),
+            properties: vec![],
+            optional: false,
+        };
+
+        let est = cost::estimate_step_cost_with_label_id(&step, engine.stats(), Some(person_label_id));
+        assert!((est.estimated_cost - 100.0).abs() < f64::EPSILON);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_cost_estimate_expand() {
+        use crate::cypher::cost;
+        use crate::cypher::planner::PlanStep;
+
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..100 {
+            engine.create_node("Node").unwrap();
+        }
+        for i in 0..100u64 {
+            engine
+                .create_relationship(i, (i + 1) % 100, "LINK")
+                .unwrap();
+            engine
+                .create_relationship(i, (i + 2) % 100, "LINK")
+                .unwrap();
+        }
+
+        let step = PlanStep::Expand {
+            from_var: "a".into(),
+            rel_var: None,
+            to_var: "b".into(),
+            rel_type: None,
+            direction: Direction::Outgoing,
+            min_hops: None,
+            max_hops: None,
+            optional: false,
+        };
+
+        let est = cost::estimate_step_cost(&step, engine.stats());
+        assert!((est.estimated_cost - 2.0).abs() < f64::EPSILON);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_page_roundtrip() {
+        use crate::storage::stats::GraphStats;
+
+        let mut stats = GraphStats::new();
+        stats.node_count = 500;
+        stats.edge_count = 1200;
+        stats.label_counts.insert(0, 200);
+        stats.label_counts.insert(1, 300);
+        stats.rel_type_counts.insert(0, 800);
+        stats.rel_type_counts.insert(1, 400);
+
+        let mut buf = vec![0u8; 4096];
+        stats.serialize(&mut buf).unwrap();
+
+        let restored = GraphStats::deserialize(&buf).unwrap();
+        assert_eq!(stats, restored);
+    }
+
+    #[test]
+    fn test_optimizer_indexed_node_scan_explain() {
+        use crate::storage::label_index::LabelIndex;
+
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..100u64 {
+            engine.create_node("Person").unwrap();
+        }
+        for _ in 0..100u64 {
+            engine.create_node("City").unwrap();
+        }
+
+        let person_label_id = engine.get_node(0).unwrap().label_token_id;
+        let ps = engine.db().page_size() as usize;
+
+        let index_root = {
+            let label_idx = LabelIndex::new(ps);
+            engine.begin().unwrap();
+            let (root, mut idx_page) = engine.db().pager().alloc_page().unwrap();
+            let data = idx_page.data_mut().unwrap();
+            data.fill(0);
+            engine.db().pager().write_page(&idx_page).unwrap();
+            for id in 0..100u64 {
+                label_idx
+                    .set_label(engine.db().pager(), person_label_id, id, root)
+                    .unwrap();
+            }
+            engine.commit().unwrap();
+            root
+        };
+
+        let stmt = parser::parse("MATCH (p:Person) RETURN p").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let mut roots = HashMap::new();
+        roots.insert(person_label_id, index_root);
+        let mut names = HashMap::new();
+        names.insert("Person".to_string(), person_label_id);
+        let optimized = optimizer::optimize(plan, engine.stats(), &roots, &names);
+
+        assert!(optimized.steps.iter().any(|s| matches!(
+            s,
+            crate::cypher::planner::PlanStep::IndexedNodeScan { .. }
+        )));
+
+        let explain_text = crate::cypher::explain::explain(&optimized);
+        assert!(explain_text.contains("IndexedNodeScan"));
+
+        let result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 100);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_predicate_pushdown() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for i in 0..10 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "age", PropertyValue::Int32(20 + i))
+                .unwrap();
+        }
+        for i in 0..10u64 {
+            engine.create_relationship(i, (i + 1) % 10, "KNOWS").unwrap();
+        }
+
+        let stmt = parser::parse("MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 25 RETURN b").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let names = engine.label_name_to_id();
+        let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+
+        let filter_pos = optimized
+            .steps
+            .iter()
+            .position(|s| matches!(s, crate::cypher::planner::PlanStep::Filter { .. }));
+        let expand_pos = optimized
+            .steps
+            .iter()
+            .position(|s| matches!(s, crate::cypher::planner::PlanStep::Expand { .. }));
+        assert!(filter_pos.unwrap() < expand_pos.unwrap());
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_join_reorder() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        for i in 0..1000 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("P{i}")))
+                .unwrap();
+        }
+        for i in 0..5 {
+            let id = engine.create_node("City").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("C{i}")))
+                .unwrap();
+        }
+
+        let mut stats = engine.stats().clone();
+        let person_id = engine.get_node(0).unwrap().label_token_id;
+        let city_id = engine.get_node(1000).unwrap().label_token_id;
+        stats.label_counts.insert(person_id, 1000);
+        stats.label_counts.insert(city_id, 5);
+
+        let names = engine.label_name_to_id();
+
+        let plan = crate::cypher::planner::QueryPlan {
+            steps: vec![
+                crate::cypher::planner::PlanStep::NodeScan {
+                    variable: "a".into(),
+                    label: Some("Person".into()),
+                    properties: vec![],
+                    optional: false,
+                },
+                crate::cypher::planner::PlanStep::Expand {
+                    from_var: "a".into(),
+                    rel_var: None,
+                    to_var: "c".into(),
+                    rel_type: Some("LIVES_IN".into()),
+                    direction: Direction::Outgoing,
+                    min_hops: None,
+                    max_hops: None,
+                    optional: false,
+                },
+                crate::cypher::planner::PlanStep::NodeScan {
+                    variable: "c".into(),
+                    label: Some("City".into()),
+                    properties: vec![],
+                    optional: false,
+                },
+                crate::cypher::planner::PlanStep::Project {
+                    items: vec![crate::cypher::ast::ReturnItem {
+                        expr: crate::cypher::ast::Expr::Variable("a".into()),
+                        alias: None,
+                    }],
+                },
+            ],
+        };
+
+        let optimized = optimizer::optimize(plan, &stats, &HashMap::new(), &names);
+        assert!(matches!(
+            &optimized.steps[0],
+            crate::cypher::planner::PlanStep::NodeScan { label: Some(l), .. } if l == "City"
+        ));
+    }
+
+    #[test]
+    fn test_optimizer_correctness() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for i in 0..20 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("P{i}")))
+                .unwrap();
+            engine
+                .set_node_property(id, "age", PropertyValue::Int32(20 + i))
+                .unwrap();
+        }
+        for i in 0..20u64 {
+            engine.create_relationship(i, (i + 1) % 20, "KNOWS").unwrap();
+        }
+
+        let cypher = "MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 30 RETURN a.name, b.name";
+        let stmt = parser::parse(cypher).unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+
+        let unoptimized_result =
+            executor::execute(&mut engine, &plan, &HashMap::new()).unwrap();
+
+        let names = engine.label_name_to_id();
+        let optimized =
+            optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+        let optimized_result =
+            executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+
+        assert_eq!(unoptimized_result.columns, optimized_result.columns);
+        assert_eq!(unoptimized_result.rows.len(), optimized_result.rows.len());
+
+        let mut unopt_sorted: Vec<_> = unoptimized_result
+            .rows
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect();
+        let mut opt_sorted: Vec<_> = optimized_result
+            .rows
+            .iter()
+            .map(|r| format!("{r:?}"))
+            .collect();
+        unopt_sorted.sort();
+        opt_sorted.sort();
+        assert_eq!(unopt_sorted, opt_sorted);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_no_index_fallback() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for i in 0..10 {
+            let id = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(id, "name", PropertyValue::ShortString(format!("P{i}")))
+                .unwrap();
+        }
+
+        let stmt = parser::parse("MATCH (p:Person) RETURN p.name").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let names = engine.label_name_to_id();
+        let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+
+        assert!(matches!(
+            &optimized.steps[0],
+            crate::cypher::planner::PlanStep::NodeScan { label: Some(l), .. } if l == "Person"
+        ));
+        assert!(!optimized.steps.iter().any(|s| matches!(
+            s,
+            crate::cypher::planner::PlanStep::IndexedNodeScan { .. }
+        )));
+
+        let result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 10);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optimizer_empty_stats() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let stmt = parser::parse("MATCH (a:Person) RETURN a").unwrap();
+        let plan = planner::plan(&stmt).unwrap();
+        let names = engine.label_name_to_id();
+        let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+        assert_eq!(optimized.steps.len(), 2);
+
+        let result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+        assert_eq!(result.rows.len(), 0);
+
+        let stmt2 =
+            parser::parse("MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 25 RETURN b").unwrap();
+        let plan2 = planner::plan(&stmt2).unwrap();
+        let optimized2 = optimizer::optimize(plan2, engine.stats(), &HashMap::new(), &names);
+        assert!(!optimized2.steps.is_empty());
+
+        let result2 = executor::execute(&mut engine, &optimized2, &HashMap::new()).unwrap();
+        assert_eq!(result2.rows.len(), 0);
+    }
+
+    #[test]
+    fn test_create_rel_with_inline_properties() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let result = engine
+            .query("CREATE (a:Person), (b:Person), (a)-[:KNOWS {since: 2020, weight: 5}]->(b)")
+            .unwrap();
+        assert_eq!(result.stats.nodes_created, 2);
+        assert_eq!(result.stats.relationships_created, 1);
+        assert!(result.stats.properties_set >= 2);
+
+        let val = engine.get_rel_property(0, "since").unwrap();
+        assert_eq!(val, Some(PropertyValue::Int32(2020)));
+
+        let weight = engine.get_rel_property(0, "weight").unwrap();
+        assert_eq!(weight, Some(PropertyValue::Int32(5)));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_stats_persistence_end_to_end() {
+        let path = temp_path();
+
+        let person_label;
+        let city_label;
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+            for _ in 0..10 {
+                engine.create_node("Person").unwrap();
+            }
+            for _ in 0..5 {
+                engine.create_node("City").unwrap();
+            }
+
+            for i in 0..8u64 {
+                engine.create_relationship(i, i + 1, "KNOWS").unwrap();
+            }
+            for i in 0..3u64 {
+                engine
+                    .create_relationship(i, 10 + (i % 5), "LIVES_IN")
+                    .unwrap();
+            }
+
+            person_label = engine.get_node(0).unwrap().label_token_id;
+            city_label = engine.get_node(10).unwrap().label_token_id;
+
+            assert_eq!(engine.stats().label_counts.get(&person_label), Some(&10));
+            assert_eq!(engine.stats().label_counts.get(&city_label), Some(&5));
+            assert_eq!(engine.stats().node_count, 15);
+            assert_eq!(engine.stats().edge_count, 11);
+        }
+
+        {
+            let engine = GraphEngine::open(&path).unwrap();
+            let stats = engine.stats();
+
+            assert_eq!(stats.node_count, 15);
+            assert_eq!(stats.edge_count, 11);
+            assert_eq!(stats.label_counts.get(&person_label), Some(&10));
+            assert_eq!(stats.label_counts.get(&city_label), Some(&5));
+
+            let knows_type = stats
+                .rel_type_counts
+                .values()
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(knows_type.contains(&8));
+            assert!(knows_type.contains(&3));
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_label_index_roots_populated() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        for _ in 0..20 {
+            engine.create_node("Person").unwrap();
+        }
+        for _ in 0..10 {
+            engine.create_node("City").unwrap();
+        }
+
+        let roots = engine.label_index_roots();
+        assert!(!roots.is_empty());
+
+        let person_label = engine.get_node(0).unwrap().label_token_id;
+        let city_label = engine.get_node(20).unwrap().label_token_id;
+        assert!(roots.contains_key(&person_label));
+        assert!(roots.contains_key(&city_label));
+
+        let names = engine.label_name_to_id();
+        assert!(names.contains_key("Person"));
+        assert!(names.contains_key("City"));
+
+        let explain = engine
+            .explain("MATCH (p:Person) RETURN p")
+            .unwrap();
+        assert!(explain.contains("IndexedNodeScan"));
+
+        let result = engine
+            .query("MATCH (p:Person) RETURN p")
+            .unwrap();
+        assert_eq!(result.rows.len(), 20);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_label_index_roots_persist() {
+        let path = temp_path();
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            for _ in 0..20 {
+                engine.create_node("Person").unwrap();
+            }
+            let roots = engine.label_index_roots();
+            assert!(!roots.is_empty());
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            let roots = engine.label_index_roots();
+            assert!(!roots.is_empty());
+
+            let result = engine.query("MATCH (p:Person) RETURN p").unwrap();
+            assert_eq!(result.rows.len(), 20);
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_large_scale_integration() {
+        let path = temp_path();
+
+        let labels = ["Person", "City", "Company"];
+
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+            for i in 0..30u64 {
+                let label = labels[(i % 3) as usize];
+                engine.create_node(label).unwrap();
+            }
+
+            for i in 0..100u64 {
+                let src = i % 30;
+                let dst = (i * 7 + 3) % 30;
+                if src == dst {
+                    continue;
+                }
+                let rel_type = if i % 2 == 0 { "KNOWS" } else { "LIVES_IN" };
+                engine.create_relationship(src, dst, rel_type).unwrap();
+            }
+
+            let neighbors = engine.get_neighbors(0, Direction::Outgoing).unwrap();
+            let mut visited = std::collections::HashSet::new();
+            visited.insert(0u64);
+            let mut frontier: Vec<u64> = neighbors.iter().map(|(id, _)| *id).collect();
+            for hop in 0..2 {
+                let mut next_frontier = Vec::new();
+                for &nid in &frontier {
+                    if visited.insert(nid) {
+                        let hop_neighbors =
+                            engine.get_neighbors(nid, Direction::Outgoing).unwrap();
+                        for (next_id, _) in hop_neighbors {
+                            next_frontier.push(next_id);
+                        }
+                    }
+                }
+                frontier = next_frontier;
+                if hop == 1 {
+                    assert!(!frontier.is_empty());
+                }
+            }
+
+            let report = crate::integrity::check_integrity(&mut engine).unwrap();
+            let non_count_errors: Vec<_> = report
+                .errors
+                .iter()
+                .filter(|e| {
+                    !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. })
+                })
+                .collect();
+            assert!(
+                non_count_errors.is_empty(),
+                "non-count errors: {:?}",
+                non_count_errors
+            );
+
+            let nc = engine.node_count();
+            let ec = engine.edge_count();
+            assert_eq!(nc, 30);
+            assert!(ec > 50);
+        }
+
+        {
+            let mut engine = GraphEngine::open(&path).unwrap();
+            assert_eq!(engine.node_count(), 30);
+            assert!(engine.edge_count() > 50);
+
+            let report = crate::integrity::check_integrity(&mut engine).unwrap();
+            let non_count_errors: Vec<_> = report
+                .errors
+                .iter()
+                .filter(|e| {
+                    !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. })
+                })
+                .collect();
+            assert!(
+                non_count_errors.is_empty(),
+                "non-count errors after reopen: {:?}",
+                non_count_errors
+            );
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+}
