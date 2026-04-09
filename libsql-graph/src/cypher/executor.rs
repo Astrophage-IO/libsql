@@ -123,6 +123,7 @@ pub fn execute(
     #[allow(unused_assignments)]
     let mut expanded_star: Option<Vec<ReturnItem>> = None;
     let mut order_items: Option<&Vec<OrderItem>> = None;
+    let mut skip: Option<u64> = None;
     let mut limit: Option<u64> = None;
 
     for step in &plan.steps {
@@ -131,10 +132,22 @@ pub fn execute(
                 variable,
                 label,
                 properties,
-                optional: _,
+                optional,
             } => {
+                let prev = binding_table.clone();
                 binding_table =
                     exec_node_scan(engine, &binding_table, variable, label, properties)?;
+                if *optional && binding_table.is_empty() {
+                    binding_table = prev
+                        .into_iter()
+                        .map(|mut b| {
+                            if !variable.is_empty() {
+                                b.insert(variable.clone(), Value::Null);
+                            }
+                            b
+                        })
+                        .collect();
+                }
             }
             PlanStep::Expand {
                 from_var,
@@ -144,7 +157,9 @@ pub fn execute(
                 direction,
                 min_hops,
                 max_hops,
+                optional,
             } => {
+                let prev = if *optional { Some(binding_table.clone()) } else { None };
                 if min_hops.is_some() || max_hops.is_some() {
                     binding_table = exec_var_length_expand(
                         engine,
@@ -166,6 +181,27 @@ pub fn execute(
                         rel_type.as_deref(),
                         *direction,
                     )?;
+                }
+                if *optional {
+                    if let Some(prev_table) = prev {
+                        for prev_row in &prev_table {
+                            let has_match = binding_table.iter().any(|b| {
+                                prev_row.iter().all(|(k, v)| b.get(k) == Some(v))
+                            });
+                            if !has_match {
+                                let mut null_row = prev_row.clone();
+                                if !to_var.is_empty() {
+                                    null_row.insert(to_var.clone(), Value::Null);
+                                }
+                                if let Some(rv) = rel_var {
+                                    if !rv.is_empty() {
+                                        null_row.insert(rv.clone(), Value::Null);
+                                    }
+                                }
+                                binding_table.push(null_row);
+                            }
+                        }
+                    }
                 }
             }
             PlanStep::Filter { predicate } => {
@@ -277,6 +313,9 @@ pub fn execute(
             PlanStep::OrderBy { items } => {
                 order_items = Some(items);
             }
+            PlanStep::Skip { count } => {
+                skip = Some(*count);
+            }
             PlanStep::Limit { count } => {
                 limit = Some(*count);
             }
@@ -308,29 +347,34 @@ pub fn execute(
     }
 
     if let Some(order) = order_items {
-        let col_indices: Vec<usize> = if let Some(proj) = project_items {
-            order.iter().map(|ord| {
-                let ord_name = expr_name(&ord.expr);
-                proj.iter().position(|item| {
-                    item.alias.as_deref() == Some(&ord_name) || expr_name(&item.expr) == ord_name
-                }).unwrap_or(0)
-            }).collect()
-        } else {
-            (0..order.len()).collect()
-        };
+        let num_projected = columns.len();
+        for (row_idx, bindings) in binding_table.iter().enumerate() {
+            if row_idx < rows.len() {
+                for ord in order {
+                    let val = eval_expr(engine, &ord.expr, bindings, params);
+                    rows[row_idx].push(val);
+                }
+            }
+        }
 
+        let sort_col_start = num_projected;
         rows.sort_by(|a, b| {
             for (i, ord) in order.iter().enumerate() {
-                let col_idx = col_indices.get(i).copied().unwrap_or(0);
-                let col_idx = col_idx.min(a.len().saturating_sub(1));
-                let cmp = compare_values(&a[col_idx], &b[col_idx]);
-                let cmp = if ord.descending { cmp.reverse() } else { cmp };
-                if cmp != std::cmp::Ordering::Equal {
-                    return cmp;
+                let col_idx = sort_col_start + i;
+                if col_idx < a.len() && col_idx < b.len() {
+                    let cmp = compare_values(&a[col_idx], &b[col_idx]);
+                    let cmp = if ord.descending { cmp.reverse() } else { cmp };
+                    if cmp != std::cmp::Ordering::Equal {
+                        return cmp;
+                    }
                 }
             }
             std::cmp::Ordering::Equal
         });
+
+        for row in &mut rows {
+            row.truncate(num_projected);
+        }
     }
 
     let is_distinct = plan.steps.iter().any(|s| matches!(s, PlanStep::Distinct));
@@ -340,6 +384,14 @@ pub fn execute(
             let key = format!("{:?}", row);
             seen.insert(key)
         });
+    }
+
+    if let Some(n) = skip {
+        if (n as usize) < rows.len() {
+            rows = rows.split_off(n as usize);
+        } else {
+            rows.clear();
+        }
     }
 
     if let Some(n) = limit {
@@ -361,6 +413,13 @@ fn exec_node_scan(
     properties: &[(String, Literal)],
 ) -> Result<Vec<Bindings>, GraphError> {
     let has_existing_bindings = current.iter().any(|b| !b.is_empty());
+    let var_already_bound = !variable.is_empty()
+        && current.iter().any(|b| b.contains_key(variable));
+
+    if var_already_bound {
+        return Ok(current.to_vec());
+    }
+
     let mut results = Vec::new();
     let label_token = match label {
         Some(name) => {
@@ -847,6 +906,8 @@ fn eval_expr(
                     Value::Float(f) => Value::Float(-f),
                     _ => Value::Null,
                 },
+                UnaryOp::IsNull => Value::Bool(val == Value::Null),
+                UnaryOp::IsNotNull => Value::Bool(val != Value::Null),
             }
         }
     }
@@ -903,6 +964,13 @@ fn eval_binop(left: &Value, op: BinOp, right: &Value) -> Value {
         },
         BinOp::In => match right {
             Value::List(items) => Value::Bool(items.contains(left)),
+            _ => Value::Null,
+        },
+        BinOp::RegexMatch => match (left, right) {
+            (Value::String(text), Value::String(pattern)) => {
+                let matches = simple_regex_match(text, pattern);
+                Value::Bool(matches)
+            }
             _ => Value::Null,
         },
     }
@@ -1027,6 +1095,60 @@ fn exec_merge(
         bindings.insert(var.clone(), Value::Node(node_id));
     }
     Ok(vec![bindings])
+}
+
+fn simple_regex_match(text: &str, pattern: &str) -> bool {
+    if pattern.starts_with("(?i)") {
+        let pat = &pattern[4..];
+        return simple_regex_match(&text.to_lowercase(), &pat.to_lowercase());
+    }
+    let pat = pattern.strip_prefix('^').unwrap_or(pattern);
+    let (pat, must_end) = if pat.ends_with('$') {
+        (&pat[..pat.len() - 1], true)
+    } else {
+        (pat, false)
+    };
+    let must_start = pattern.starts_with('^');
+
+    if pat == ".*" {
+        return true;
+    }
+
+    let parts: Vec<&str> = pat.split(".*").collect();
+    if parts.len() == 1 {
+        if must_start && must_end {
+            return text == pat;
+        } else if must_start {
+            return text.starts_with(pat);
+        } else if must_end {
+            return text.ends_with(pat);
+        } else {
+            return text.contains(pat);
+        }
+    }
+
+    let mut pos = 0;
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if i == 0 && must_start {
+            if !text[pos..].starts_with(part) {
+                return false;
+            }
+            pos += part.len();
+        } else if let Some(found) = text[pos..].find(part) {
+            pos += found + part.len();
+        } else {
+            return false;
+        }
+    }
+
+    if must_end {
+        pos == text.len() || parts.last() == Some(&"")
+    } else {
+        true
+    }
 }
 
 fn is_aggregate_expr(expr: &Expr) -> bool {
@@ -1891,6 +2013,129 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::String("Alice".into()));
         assert_eq!(result.rows[0][1], Value::String("Bob".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optional_match_with_results() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name",
+        );
+        assert_eq!(result.rows.len(), 2);
+        for row in &result.rows {
+            assert_eq!(row[0], Value::String("Alice".into()));
+            assert!(matches!(row[1], Value::String(_)));
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_optional_match_no_results() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Charlie' OPTIONAL MATCH (a)-[:WORKS_AT]->(b) RETURN a.name, b",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Charlie".into()));
+        assert_eq!(result.rows[0][1], Value::Null);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_is_null() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.email IS NULL RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 3);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_is_not_null() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name IS NOT NULL RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 3);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_skip() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN a.name ORDER BY a.age SKIP 1 LIMIT 1",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_skip_all() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN a.name SKIP 100",
+        );
+        assert_eq!(result.rows.len(), 0);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_regex_match() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name =~ 'A.*' RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_regex_contains() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name =~ '.*li.*' RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 2);
+        let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
+        assert!(names.contains(&&Value::String("Alice".into())));
+        assert!(names.contains(&&Value::String("Charlie".into())));
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

@@ -22,6 +22,7 @@ pub enum PlanStep {
         direction: Direction,
         min_hops: Option<u32>,
         max_hops: Option<u32>,
+        optional: bool,
     },
     Filter {
         predicate: Expr,
@@ -51,6 +52,9 @@ pub enum PlanStep {
     },
     OrderBy {
         items: Vec<OrderItem>,
+    },
+    Skip {
+        count: u64,
     },
     Limit {
         count: u64,
@@ -122,6 +126,7 @@ fn plan_match(m: &MatchStatement) -> Result<QueryPlan, String> {
                     direction,
                     min_hops: rel.min_hops,
                     max_hops: rel.max_hops,
+                    optional: m.optional,
                 });
             } else {
                 return Err("expected node after relationship".into());
@@ -175,6 +180,9 @@ fn plan_match(m: &MatchStatement) -> Result<QueryPlan, String> {
             steps.push(PlanStep::OrderBy {
                 items: order.clone(),
             });
+        }
+        if let Some(skip) = ret.skip {
+            steps.push(PlanStep::Skip { count: skip });
         }
         if let Some(limit) = ret.limit {
             steps.push(PlanStep::Limit { count: limit });

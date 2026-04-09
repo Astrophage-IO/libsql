@@ -276,6 +276,16 @@ impl Parser {
             None
         };
 
+        let skip = if *self.peek() == Token::Skip {
+            self.advance();
+            match self.advance() {
+                Token::Integer(n) => Some(n as u64),
+                tok => return Err(format!("expected integer after SKIP, got {:?}", tok)),
+            }
+        } else {
+            None
+        };
+
         let limit = if *self.peek() == Token::Limit {
             self.advance();
             match self.advance() {
@@ -290,6 +300,7 @@ impl Parser {
             distinct,
             items,
             order_by,
+            skip,
             limit,
         })
     }
@@ -541,6 +552,17 @@ impl Parser {
             Token::Gte => BinOp::Gte,
             Token::Contains => BinOp::Contains,
             Token::In => BinOp::In,
+            Token::RegexOp => BinOp::RegexMatch,
+            Token::Is => {
+                self.advance();
+                if *self.peek() == Token::Not {
+                    self.advance();
+                    self.expect(&Token::Null)?;
+                    return Ok(Expr::UnaryOp(UnaryOp::IsNotNull, Box::new(left)));
+                }
+                self.expect(&Token::Null)?;
+                return Ok(Expr::UnaryOp(UnaryOp::IsNull, Box::new(left)));
+            }
             Token::StartsWith => {
                 self.advance();
                 self.expect(&Token::With).map_err(|_| "expected WITH after STARTS".to_string())?;

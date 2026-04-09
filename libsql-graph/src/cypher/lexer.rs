@@ -35,6 +35,9 @@ pub enum Token {
     Then,
     Else,
     End,
+    Is,
+    Skip,
+    RegexOp,
 
     Ident(String),
     Integer(i64),
@@ -202,7 +205,12 @@ impl Lexer {
             }
             '=' => {
                 self.advance();
-                Ok(Token::Eq)
+                if self.peek() == Some('~') {
+                    self.advance();
+                    Ok(Token::RegexOp)
+                } else {
+                    Ok(Token::Eq)
+                }
             }
             '$' => {
                 self.advance();
@@ -322,6 +330,8 @@ fn keyword_or_ident(s: String) -> Token {
         "WITH" => Token::With,
         "UNWIND" => Token::Unwind,
         "OPTIONAL" => Token::Optional,
+        "IS" => Token::Is,
+        "SKIP" => Token::Skip,
         "CASE" => Token::Case,
         "WHEN" => Token::When,
         "THEN" => Token::Then,

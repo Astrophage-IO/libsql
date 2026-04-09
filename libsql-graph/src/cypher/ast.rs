@@ -77,6 +77,7 @@ pub struct ReturnClause {
     pub distinct: bool,
     pub items: Vec<ReturnItem>,
     pub order_by: Option<Vec<OrderItem>>,
+    pub skip: Option<u64>,
     pub limit: Option<u64>,
 }
 
@@ -180,10 +181,13 @@ pub enum BinOp {
     StartsWith,
     EndsWith,
     In,
+    RegexMatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
     Neg,
+    IsNull,
+    IsNotNull,
 }

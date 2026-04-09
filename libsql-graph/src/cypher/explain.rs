@@ -50,6 +50,7 @@ fn operation_name(step: &PlanStep) -> String {
         PlanStep::DeleteNode { .. } => "DeleteNode".into(),
         PlanStep::Project { .. } => "Project".into(),
         PlanStep::OrderBy { .. } => "OrderBy".into(),
+        PlanStep::Skip { .. } => "Skip".into(),
         PlanStep::Limit { .. } => "Limit".into(),
         PlanStep::Distinct => "Distinct".into(),
         PlanStep::With { .. } => "With".into(),
@@ -175,6 +176,7 @@ fn format_step(step: &PlanStep) -> String {
                 .collect();
             format!("OrderBy({})", cols.join(", "))
         }
+        PlanStep::Skip { count } => format!("Skip({count})"),
         PlanStep::Limit { count } => format!("Limit({count})"),
         PlanStep::Distinct => "Distinct".into(),
         PlanStep::With { items, .. } => {
@@ -230,6 +232,7 @@ fn format_expr(expr: &crate::cypher::ast::Expr) -> String {
                 BinOp::StartsWith => "STARTS WITH",
                 BinOp::EndsWith => "ENDS WITH",
                 BinOp::In => "IN",
+                BinOp::RegexMatch => "=~",
             };
             format!("{} {} {}", format_expr(l), op_str, format_expr(r))
         }
@@ -237,6 +240,8 @@ fn format_expr(expr: &crate::cypher::ast::Expr) -> String {
             let op_str = match op {
                 UnaryOp::Not => "NOT",
                 UnaryOp::Neg => "-",
+                UnaryOp::IsNull => "IS NULL",
+                UnaryOp::IsNotNull => "IS NOT NULL",
             };
             format!("{op_str} {}", format_expr(inner))
         }
@@ -253,6 +258,7 @@ fn estimate_rows(step: &PlanStep) -> String {
         PlanStep::NodeScan { label: None, .. } => "N (all)".into(),
         PlanStep::Expand { .. } => "N*avg_degree".into(),
         PlanStep::Filter { .. } => "selectivity".into(),
+        PlanStep::Skip { count } => format!("-{count}"),
         PlanStep::Limit { count } => format!("{count}"),
         PlanStep::Distinct => "<=input".into(),
         PlanStep::With { .. } => "<=input".into(),
