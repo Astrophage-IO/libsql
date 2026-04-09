@@ -29,6 +29,7 @@ pub struct GraphEngine<P: Pager> {
     property_store: PropertyStore,
     string_overflow: StringOverflowStore,
     rel_group_store: RelGroupStore,
+    tx_active: bool,
 }
 
 impl GraphEngine<FilePager> {
@@ -45,6 +46,7 @@ impl GraphEngine<FilePager> {
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
             db,
+            tx_active: false,
         })
     }
 
@@ -61,6 +63,7 @@ impl GraphEngine<FilePager> {
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
             db,
+            tx_active: false,
         })
     }
 }
@@ -77,7 +80,73 @@ impl<P: Pager> GraphEngine<P> {
             string_overflow: StringOverflowStore::new(ps),
             rel_group_store: RelGroupStore::new(ps),
             db,
+            tx_active: false,
         }
+    }
+
+    pub fn begin(&mut self) -> Result<(), GraphError> {
+        if self.tx_active {
+            return Err(GraphError::TransactionActive);
+        }
+        self.db.pager().begin_write()?;
+        self.tx_active = true;
+        Ok(())
+    }
+
+    pub fn commit(&mut self) -> Result<(), GraphError> {
+        if !self.tx_active {
+            return Err(GraphError::NoTransaction);
+        }
+        self.flush_header_page()?;
+        self.db.pager().commit()?;
+        self.tx_active = false;
+        Ok(())
+    }
+
+    pub fn rollback(&mut self) -> Result<(), GraphError> {
+        if !self.tx_active {
+            return Err(GraphError::NoTransaction);
+        }
+        self.db.pager().rollback()?;
+        self.tx_active = false;
+        self.reload_header()?;
+        Ok(())
+    }
+
+    pub fn in_transaction(&self) -> bool {
+        self.tx_active
+    }
+
+    fn reload_header(&mut self) -> Result<(), GraphError> {
+        self.db.pager().begin_read()?;
+        let page = self.db.pager().get_page(1)?;
+        let header = crate::storage::header::GraphHeader::read(page.data())?;
+        *self.db.header_mut() = header;
+        Ok(())
+    }
+
+    fn flush_header_page(&mut self) -> Result<(), GraphError> {
+        let mut header_page = self.db.pager().get_page(1)?;
+        self.db.header().write(header_page.data_mut()?)?;
+        self.db.pager().write_page(&header_page)?;
+        Ok(())
+    }
+
+    fn auto_begin(&mut self) -> Result<bool, GraphError> {
+        if self.tx_active {
+            return Ok(false);
+        }
+        self.db.pager().begin_write()?;
+        self.tx_active = true;
+        Ok(true)
+    }
+
+    fn auto_commit(&mut self, auto: bool) -> Result<(), GraphError> {
+        if auto {
+            self.flush_and_commit()?;
+            self.tx_active = false;
+        }
+        Ok(())
     }
 
     pub fn get_or_create_label(&mut self, name: &str) -> Result<u32, GraphError> {
@@ -117,7 +186,7 @@ impl<P: Pager> GraphEngine<P> {
     }
 
     pub fn create_node(&mut self, label: &str) -> Result<u64, GraphError> {
-        self.db.pager().begin_write()?;
+        let auto = self.auto_begin()?;
 
         let label_id = self.get_or_create_label(label)?;
         let node_id = self.db.next_node_id();
@@ -126,7 +195,7 @@ impl<P: Pager> GraphEngine<P> {
             .create_node(self.db.pager(), node_id, &record)?;
 
         self.db.header_mut().node_count += 1;
-        self.flush_and_commit()?;
+        self.auto_commit(auto)?;
         Ok(node_id)
     }
 
@@ -140,7 +209,7 @@ impl<P: Pager> GraphEngine<P> {
         target_id: u64,
         rel_type: &str,
     ) -> Result<u64, GraphError> {
-        self.db.pager().begin_write()?;
+        let auto = self.auto_begin()?;
 
         let type_id = self.get_or_create_rel_type(rel_type)?;
         let rel_id = self.db.next_rel_id();
@@ -210,7 +279,7 @@ impl<P: Pager> GraphEngine<P> {
             .write_node(self.db.pager(), target_id, &dst_node)?;
 
         self.db.header_mut().edge_count += 1;
-        self.flush_and_commit()?;
+        self.auto_commit(auto)?;
 
         Ok(rel_id)
     }
@@ -432,7 +501,7 @@ impl<P: Pager> GraphEngine<P> {
         key: &str,
         value: PropertyValue,
     ) -> Result<(), GraphError> {
-        self.db.pager().begin_write()?;
+        let auto = self.auto_begin()?;
         let value = self.store_property_value(value)?;
         let key_id = self.get_or_create_prop_key(key)?;
         let mut node = self.node_store.read_node(self.db.pager(), node_id)?;
@@ -457,7 +526,7 @@ impl<P: Pager> GraphEngine<P> {
                 if record.set_block(key_id, PropertyBlock::new(key_id, &value)) {
                     self.property_store
                         .write_record(self.db.pager(), current, &record)?;
-                    self.flush_and_commit()?;
+                    self.auto_commit(auto)?;
                     return Ok(());
                 }
                 prev = current;
@@ -477,7 +546,7 @@ impl<P: Pager> GraphEngine<P> {
                 .write_record(self.db.pager(), prev, &prev_record)?;
         }
 
-        self.flush_and_commit()
+        self.auto_commit(auto)
     }
 
     pub fn get_node_property(
@@ -546,7 +615,7 @@ impl<P: Pager> GraphEngine<P> {
         key: &str,
         value_raw: PropertyValue,
     ) -> Result<(), GraphError> {
-        self.db.pager().begin_write()?;
+        let auto = self.auto_begin()?;
         let value = self.store_property_value(value_raw)?;
         let key_id = self.get_or_create_prop_key(key)?;
         let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
@@ -572,7 +641,7 @@ impl<P: Pager> GraphEngine<P> {
                 if record.set_block(key_id, PropertyBlock::new(key_id, &value)) {
                     self.property_store
                         .write_record(self.db.pager(), current, &record)?;
-                    self.flush_and_commit()?;
+                    self.auto_commit(auto)?;
                     return Ok(());
                 }
                 prev = current;
@@ -592,7 +661,7 @@ impl<P: Pager> GraphEngine<P> {
                 .write_record(self.db.pager(), prev, &prev_record)?;
         }
 
-        self.flush_and_commit()
+        self.auto_commit(auto)
     }
 
     pub fn get_rel_property(
@@ -644,11 +713,11 @@ impl<P: Pager> GraphEngine<P> {
     }
 
     pub fn delete_relationship(&mut self, rel_id: u64) -> Result<(), GraphError> {
-        self.db.pager().begin_write()?;
+        let auto = self.auto_begin()?;
 
         let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
         if !rel.in_use() {
-            self.db.pager().commit()?;
+            self.auto_commit(auto)?;
             return Ok(());
         }
 
@@ -676,15 +745,15 @@ impl<P: Pager> GraphEngine<P> {
         }
 
         self.db.header_mut().edge_count = self.db.header().edge_count.saturating_sub(1);
-        self.flush_and_commit()
+        self.auto_commit(auto)
     }
 
     pub fn detach_delete_node(&mut self, node_id: u64) -> Result<(), GraphError> {
-        self.db.pager().begin_write()?;
+        let auto = self.auto_begin()?;
 
         let node = self.node_store.read_node(self.db.pager(), node_id)?;
         if !node.in_use() {
-            self.db.pager().commit()?;
+            self.auto_commit(auto)?;
             return Ok(());
         }
 
@@ -709,16 +778,13 @@ impl<P: Pager> GraphEngine<P> {
             };
         }
 
-        self.db.pager().commit()?;
-
         for rel_id in rel_ids_to_delete {
             self.delete_relationship(rel_id)?;
         }
 
-        self.db.pager().begin_write()?;
         self.node_store.delete_node(self.db.pager(), node_id)?;
         self.db.header_mut().node_count = self.db.header().node_count.saturating_sub(1);
-        self.flush_and_commit()
+        self.auto_commit(auto)
     }
 
     pub fn get_label_name(&mut self, label_token_id: u32) -> Result<String, GraphError> {
@@ -779,11 +845,11 @@ impl<P: Pager> GraphEngine<P> {
     }
 
     pub fn convert_to_dense(&mut self, node_id: u64) -> Result<(), GraphError> {
-        self.db.pager().begin_write()?;
+        let auto = self.auto_begin()?;
 
         let mut node = self.node_store.read_node(self.db.pager(), node_id)?;
         if node.is_dense() || node.first_rel.is_null() {
-            self.db.pager().commit()?;
+            self.auto_commit(auto)?;
             return Ok(());
         }
 
@@ -855,7 +921,7 @@ impl<P: Pager> GraphEngine<P> {
         node.set_dense(true);
         self.node_store.write_node(self.db.pager(), node_id, &node)?;
 
-        self.flush_and_commit()
+        self.auto_commit(auto)
     }
 
     pub fn is_dense(&mut self, node_id: u64) -> Result<bool, GraphError> {
@@ -1029,13 +1095,32 @@ impl<'a, P: Pager> TransactionBatch<'a, P> {
     }
 
     pub fn execute(self) -> Result<Vec<QueryResult>, GraphError> {
+        self.engine.begin()?;
         let mut results = Vec::with_capacity(self.queries.len());
         for (cypher, params) in &self.queries {
-            let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
-            let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
-            let result = executor::execute(self.engine, &plan, params)?;
-            results.push(result);
+            let stmt = match parser::parse(cypher) {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = self.engine.rollback();
+                    return Err(GraphError::QueryParse(e));
+                }
+            };
+            let plan = match planner::plan(&stmt) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = self.engine.rollback();
+                    return Err(GraphError::QueryPlan(e));
+                }
+            };
+            match executor::execute(self.engine, &plan, params) {
+                Ok(result) => results.push(result),
+                Err(e) => {
+                    let _ = self.engine.rollback();
+                    return Err(e);
+                }
+            }
         }
+        self.engine.commit()?;
         Ok(results)
     }
 }
@@ -1683,5 +1768,167 @@ mod tests {
         let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
         assert_eq!(neighbors.len(), 1);
         assert_eq!(neighbors[0].0, b);
+    }
+
+    #[test]
+    fn test_explicit_commit() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.commit().unwrap();
+
+        assert_eq!(engine.node_count(), 3);
+        let n = engine.get_node(0).unwrap();
+        assert!(n.in_use());
+        let n = engine.get_node(1).unwrap();
+        assert!(n.in_use());
+        let n = engine.get_node(2).unwrap();
+        assert!(n.in_use());
+    }
+
+    #[test]
+    fn test_explicit_rollback() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.rollback().unwrap();
+
+        assert_eq!(engine.node_count(), 0);
+    }
+
+    #[test]
+    fn test_auto_commit_backward_compat() {
+        let path = temp_path();
+        {
+            let mut engine = GraphEngine::create(&path, 4096).unwrap();
+            engine.create_node("Person").unwrap();
+            assert_eq!(engine.node_count(), 1);
+        }
+        {
+            let engine = GraphEngine::open(&path).unwrap();
+            assert_eq!(engine.node_count(), 1);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_rollback_restores_counters() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let initial_next = engine.db.header().next_node_id;
+
+        engine.begin().unwrap();
+        engine.create_node("Person").unwrap();
+        assert_eq!(engine.db.header().next_node_id, initial_next + 1);
+        engine.rollback().unwrap();
+
+        assert_eq!(engine.db.header().next_node_id, initial_next);
+    }
+
+    #[test]
+    fn test_transaction_batch_atomicity() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let result = TransactionBatch::new(&mut engine)
+            .add("CREATE (a:Person {name: 'Alice'})")
+            .add("THIS IS NOT VALID CYPHER")
+            .execute();
+
+        assert!(result.is_err());
+        assert_eq!(engine.node_count(), 0);
+    }
+
+    #[test]
+    fn test_double_begin_error() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+        let err = engine.begin().unwrap_err();
+        assert!(matches!(err, GraphError::TransactionActive));
+        engine.rollback().unwrap();
+    }
+
+    #[test]
+    fn test_commit_without_begin_error() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let err = engine.commit().unwrap_err();
+        assert!(matches!(err, GraphError::NoTransaction));
+    }
+
+    #[test]
+    fn test_mixed_operations_in_transaction() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        engine.begin().unwrap();
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        let c = engine.create_node("Company").unwrap();
+
+        engine
+            .set_node_property(a, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+        engine
+            .set_node_property(b, "name", PropertyValue::ShortString("Bob".into()))
+            .unwrap();
+        engine
+            .set_node_property(c, "name", PropertyValue::ShortString("Acme".into()))
+            .unwrap();
+
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+        engine.create_relationship(a, c, "WORKS_AT").unwrap();
+
+        engine.commit().unwrap();
+
+        assert_eq!(engine.node_count(), 3);
+        assert_eq!(engine.edge_count(), 2);
+
+        let name = engine.get_node_property(a, "name").unwrap();
+        assert_eq!(name, Some(PropertyValue::ShortString("Alice".into())));
+
+        let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 2);
     }
 }
