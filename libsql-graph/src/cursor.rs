@@ -1,7 +1,7 @@
 use crate::error::GraphError;
 use crate::graph::Direction;
 use crate::storage::node_store::{NodeRecord, NodeStore};
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 use crate::storage::record::RecordAddress;
 use crate::storage::rel_store::{RelRecord, RelStore};
 
@@ -28,7 +28,7 @@ impl NodeCursor {
 
     pub fn read(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_store: &NodeStore,
     ) -> Result<NodeRecord, GraphError> {
         node_store.read_node(pager, self.current_id)
@@ -36,7 +36,7 @@ impl NodeCursor {
 
     pub fn next(
         &mut self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_store: &NodeStore,
     ) -> Result<bool, GraphError> {
         loop {
@@ -53,7 +53,7 @@ impl NodeCursor {
 
     pub fn scan_label(
         &mut self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_store: &NodeStore,
         label_token: u32,
     ) -> Result<bool, GraphError> {
@@ -71,7 +71,7 @@ impl NodeCursor {
 
     pub fn next_with_label(
         &mut self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_store: &NodeStore,
         label_token: u32,
     ) -> Result<bool, GraphError> {
@@ -108,7 +108,7 @@ impl RelChainCursor {
 
     pub fn next(
         &mut self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         rel_store: &RelStore,
     ) -> Result<Option<(RelRecord, RecordAddress)>, GraphError> {
         loop {
@@ -153,7 +153,7 @@ impl RelChainCursor {
 
     pub fn collect_neighbors(
         &mut self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         rel_store: &RelStore,
         node_store: &NodeStore,
     ) -> Result<Vec<NeighborEntry>, GraphError> {
@@ -193,7 +193,7 @@ pub struct NeighborEntry {
 }
 
 pub fn bfs(
-    pager: &mut GraphPager,
+    pager: &mut impl Pager,
     node_store: &NodeStore,
     rel_store: &RelStore,
     start_id: u64,
@@ -236,7 +236,7 @@ pub fn bfs(
 }
 
 pub fn shortest_path(
-    pager: &mut GraphPager,
+    pager: &mut impl Pager,
     node_store: &NodeStore,
     rel_store: &RelStore,
     start_id: u64,
@@ -294,7 +294,7 @@ pub fn shortest_path(
 }
 
 pub fn dfs(
-    pager: &mut GraphPager,
+    pager: &mut impl Pager,
     node_store: &NodeStore,
     rel_store: &RelStore,
     start_id: u64,
@@ -338,7 +338,7 @@ pub fn dfs(
 }
 
 pub fn dijkstra(
-    pager: &mut GraphPager,
+    pager: &mut impl Pager,
     node_store: &NodeStore,
     rel_store: &RelStore,
     start_id: u64,
@@ -472,7 +472,7 @@ mod tests {
         p
     }
 
-    fn build_test_graph(path: &str) -> GraphEngine {
+    fn build_test_graph(path: &str) -> GraphEngine<crate::storage::pager_bridge::FilePager> {
         let mut engine = GraphEngine::create(path, 4096).unwrap();
         //    0:Alice --KNOWS--> 1:Bob
         //    0:Alice --KNOWS--> 2:Charlie

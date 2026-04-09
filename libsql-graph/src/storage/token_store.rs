@@ -1,6 +1,6 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 use crate::storage::record::{
     address_for_id, records_per_page, RecordAddress, TOKEN_RECORD_SIZE,
 };
@@ -104,7 +104,7 @@ impl TokenStore {
 
     fn ensure_page_exists(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: &RecordAddress,
     ) -> Result<(), GraphError> {
         while pager.db_size() < addr.page {
@@ -123,7 +123,7 @@ impl TokenStore {
 
     pub fn create_token(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         record: &TokenRecord,
     ) -> Result<RecordAddress, GraphError> {
         let addr = self.address(record.token_id);
@@ -145,7 +145,7 @@ impl TokenStore {
 
     pub fn read_token(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         token_id: u32,
     ) -> Result<TokenRecord, GraphError> {
         let addr = self.address(token_id);
@@ -161,7 +161,7 @@ impl TokenStore {
 
     pub fn find_by_name(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         name: &str,
         kind: u8,
         next_token_id: u32,
@@ -183,6 +183,7 @@ impl TokenStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pager_bridge::FilePager;
     use tempfile::NamedTempFile;
 
     fn temp_path() -> String {
@@ -192,8 +193,8 @@ mod tests {
         p
     }
 
-    fn setup_pager(path: &str) -> (GraphPager, u32) {
-        let mut pager = GraphPager::open(path, 4096).unwrap();
+    fn setup_pager(path: &str) -> (FilePager, u32) {
+        let mut pager = FilePager::open(path, 4096).unwrap();
         pager.begin_write().unwrap();
 
         let (_, mut header_page) = pager.alloc_page().unwrap();

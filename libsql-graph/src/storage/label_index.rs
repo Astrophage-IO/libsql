@@ -1,5 +1,5 @@
 use crate::error::GraphError;
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 
 const LABEL_INDEX_PAGE_TYPE: u8 = 0x08;
 const LABEL_INDEX_HEADER_SIZE: usize = 12;
@@ -23,7 +23,7 @@ impl LabelIndex {
 
     fn read_or_create_page(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         pgno: u32,
         label_token: u32,
     ) -> Result<(), GraphError> {
@@ -42,7 +42,7 @@ impl LabelIndex {
 
     pub fn set_label(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         label_token: u32,
         node_id: u64,
         index_root: u32,
@@ -63,7 +63,7 @@ impl LabelIndex {
 
     pub fn clear_label(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_id: u64,
         index_root: u32,
     ) -> Result<(), GraphError> {
@@ -85,7 +85,7 @@ impl LabelIndex {
 
     pub fn has_label(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_id: u64,
         index_root: u32,
     ) -> Result<bool, GraphError> {
@@ -105,7 +105,7 @@ impl LabelIndex {
 
     pub fn scan(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         index_root: u32,
         max_node_id: u64,
     ) -> Result<Vec<u64>, GraphError> {
@@ -144,7 +144,7 @@ impl LabelIndex {
 
     pub fn count(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         index_root: u32,
         max_node_id: u64,
     ) -> Result<u64, GraphError> {
@@ -195,6 +195,7 @@ impl LabelIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pager_bridge::FilePager;
     use tempfile::NamedTempFile;
 
     fn temp_path() -> String {
@@ -204,8 +205,8 @@ mod tests {
         p
     }
 
-    fn setup_pager(path: &str, extra_pages: u32) -> GraphPager {
-        let mut pager = GraphPager::open(path, 4096).unwrap();
+    fn setup_pager(path: &str, extra_pages: u32) -> FilePager {
+        let mut pager = FilePager::open(path, 4096).unwrap();
         pager.begin_write().unwrap();
         for _ in 0..extra_pages {
             let (_, mut page) = pager.alloc_page().unwrap();

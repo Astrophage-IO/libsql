@@ -1,7 +1,8 @@
 use crate::error::GraphError;
 use crate::graph::GraphEngine;
+use crate::storage::pager::Pager;
 
-pub fn dump_cypher(engine: &mut GraphEngine) -> Result<String, GraphError> {
+pub fn dump_cypher<P: Pager>(engine: &mut GraphEngine<P>) -> Result<String, GraphError> {
     let mut lines = Vec::new();
     let max_node = engine.db().header().next_node_id;
     let max_rel = engine.db().header().next_rel_id;
@@ -66,7 +67,7 @@ pub fn dump_cypher(engine: &mut GraphEngine) -> Result<String, GraphError> {
     Ok(lines.join("\n"))
 }
 
-pub fn dump_stats(engine: &mut GraphEngine) -> Result<String, GraphError> {
+pub fn dump_stats<P: Pager>(engine: &mut GraphEngine<P>) -> Result<String, GraphError> {
     let schema = engine.schema()?;
     let mut lines = Vec::new();
 

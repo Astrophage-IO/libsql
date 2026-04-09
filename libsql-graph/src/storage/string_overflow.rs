@@ -1,5 +1,5 @@
 use crate::error::GraphError;
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 use crate::storage::record::RecordAddress;
 
 const STRING_OVERFLOW_PAGE_TYPE: u8 = 0x07;
@@ -20,7 +20,7 @@ impl StringOverflowStore {
 
     pub fn write_string(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         text: &str,
     ) -> Result<RecordAddress, GraphError> {
         let bytes = text.as_bytes();
@@ -66,7 +66,7 @@ impl StringOverflowStore {
 
     pub fn read_string(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: RecordAddress,
     ) -> Result<String, GraphError> {
         if addr.is_null() {
@@ -100,7 +100,7 @@ impl StringOverflowStore {
 
     pub fn delete_string(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: RecordAddress,
     ) -> Result<(), GraphError> {
         if addr.is_null() {
@@ -127,6 +127,7 @@ impl StringOverflowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pager_bridge::FilePager;
     use tempfile::NamedTempFile;
 
     fn temp_path() -> String {
@@ -136,8 +137,8 @@ mod tests {
         p
     }
 
-    fn setup_pager(path: &str) -> GraphPager {
-        let mut pager = GraphPager::open(path, 4096).unwrap();
+    fn setup_pager(path: &str) -> FilePager {
+        let mut pager = FilePager::open(path, 4096).unwrap();
         pager.begin_write().unwrap();
         let (_, mut page) = pager.alloc_page().unwrap();
         page.data_mut().unwrap().fill(0);

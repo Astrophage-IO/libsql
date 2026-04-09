@@ -1,6 +1,6 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 use crate::storage::record::{
     records_per_page, RecordAddress,
 };
@@ -106,7 +106,7 @@ impl RelGroupStore {
 
     pub fn create_group(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         record: &RelGroupRecord,
     ) -> Result<RecordAddress, GraphError> {
         let (pgno, mut page) = pager.alloc_page()?;
@@ -125,7 +125,7 @@ impl RelGroupStore {
 
     pub fn read_group(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: RecordAddress,
     ) -> Result<RelGroupRecord, GraphError> {
         if addr.page > pager.db_size() {
@@ -139,7 +139,7 @@ impl RelGroupStore {
 
     pub fn write_group(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: RecordAddress,
         record: &RelGroupRecord,
     ) -> Result<(), GraphError> {
@@ -156,7 +156,7 @@ impl RelGroupStore {
 
     pub fn find_or_create_group(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         first_group: RecordAddress,
         type_token_id: u32,
     ) -> Result<(RecordAddress, RelGroupRecord, bool), GraphError> {
@@ -186,7 +186,7 @@ impl RelGroupStore {
 
     pub fn iter_groups(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         first_group: RecordAddress,
     ) -> Result<Vec<(RecordAddress, RelGroupRecord)>, GraphError> {
         let mut result = Vec::new();
@@ -207,6 +207,7 @@ impl RelGroupStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pager_bridge::FilePager;
     use tempfile::NamedTempFile;
 
     fn temp_path() -> String {
@@ -216,8 +217,8 @@ mod tests {
         p
     }
 
-    fn setup_pager(path: &str) -> GraphPager {
-        let mut pager = GraphPager::open(path, 4096).unwrap();
+    fn setup_pager(path: &str) -> FilePager {
+        let mut pager = FilePager::open(path, 4096).unwrap();
         pager.begin_write().unwrap();
         let (_, mut page) = pager.alloc_page().unwrap();
         page.data_mut().unwrap().fill(0);

@@ -4,6 +4,7 @@ use crate::cypher::ast::*;
 use crate::cypher::planner::{PlanStep, QueryPlan};
 use crate::error::GraphError;
 use crate::graph::{Direction, GraphEngine};
+use crate::storage::pager::Pager;
 use crate::storage::property_store::PropertyValue;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,8 +112,8 @@ pub struct QueryStats {
     pub nodes_deleted: u64,
 }
 
-pub fn execute(
-    engine: &mut GraphEngine,
+pub fn execute<P: Pager>(
+    engine: &mut GraphEngine<P>,
     plan: &QueryPlan,
     params: &HashMap<String, Value>,
 ) -> Result<QueryResult, GraphError> {
@@ -405,8 +406,8 @@ pub fn execute(
     })
 }
 
-fn exec_node_scan(
-    engine: &mut GraphEngine,
+fn exec_node_scan<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     variable: &str,
     label: &Option<String>,
@@ -486,8 +487,8 @@ fn exec_node_scan(
     Ok(results)
 }
 
-fn exec_expand(
-    engine: &mut GraphEngine,
+fn exec_expand<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     from_var: &str,
     to_var: &str,
@@ -556,8 +557,8 @@ fn exec_expand(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn exec_var_length_expand(
-    engine: &mut GraphEngine,
+fn exec_var_length_expand<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     from_var: &str,
     to_var: &str,
@@ -626,8 +627,8 @@ fn exec_var_length_expand(
     Ok(results)
 }
 
-fn exec_filter(
-    engine: &mut GraphEngine,
+fn exec_filter<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     predicate: &Expr,
     params: &HashMap<String, Value>,
@@ -642,8 +643,8 @@ fn exec_filter(
     Ok(results)
 }
 
-fn exec_create_node(
-    engine: &mut GraphEngine,
+fn exec_create_node<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     variable: &Option<String>,
     label: &Option<String>,
@@ -680,8 +681,8 @@ fn exec_create_node(
     Ok(results)
 }
 
-fn exec_create_rel(
-    engine: &mut GraphEngine,
+fn exec_create_rel<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     from_var: &str,
     rel_type: &str,
@@ -706,8 +707,8 @@ fn exec_create_rel(
     Ok(())
 }
 
-fn exec_set_property(
-    engine: &mut GraphEngine,
+fn exec_set_property<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     variable: &str,
     property: &str,
@@ -727,8 +728,8 @@ fn exec_set_property(
     Ok(())
 }
 
-fn exec_delete(
-    engine: &mut GraphEngine,
+fn exec_delete<P: Pager>(
+    engine: &mut GraphEngine<P>,
     current: &[Bindings],
     variable: &str,
     detach: bool,
@@ -762,8 +763,8 @@ fn exec_delete(
     Ok(())
 }
 
-fn eval_expr(
-    engine: &mut GraphEngine,
+fn eval_expr<P: Pager>(
+    engine: &mut GraphEngine<P>,
     expr: &Expr,
     bindings: &Bindings,
     params: &HashMap<String, Value>,
@@ -1217,8 +1218,8 @@ fn expr_name(expr: &Expr) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn exec_merge(
-    engine: &mut GraphEngine,
+fn exec_merge<P: Pager>(
+    engine: &mut GraphEngine<P>,
     _current: &[Bindings],
     variable: &Option<String>,
     label: &Option<String>,
@@ -1374,8 +1375,8 @@ fn is_aggregate_expr(expr: &Expr) -> bool {
     }
 }
 
-fn exec_aggregate(
-    engine: &mut GraphEngine,
+fn exec_aggregate<P: Pager>(
+    engine: &mut GraphEngine<P>,
     binding_table: &[Bindings],
     items: &[ReturnItem],
     params: &HashMap<String, Value>,
@@ -1441,8 +1442,8 @@ fn exec_aggregate(
         .collect()
 }
 
-fn compute_aggregate(
-    engine: &mut GraphEngine,
+fn compute_aggregate<P: Pager>(
+    engine: &mut GraphEngine<P>,
     binding_table: &[Bindings],
     expr: &Expr,
     params: &HashMap<String, Value>,
@@ -1530,7 +1531,7 @@ mod tests {
         p
     }
 
-    fn setup_social_graph(path: &str) -> GraphEngine {
+    fn setup_social_graph(path: &str) -> GraphEngine<crate::storage::pager_bridge::FilePager> {
         let mut engine = GraphEngine::create(path, 4096).unwrap();
         let alice = engine.create_node("Person").unwrap();
         let bob = engine.create_node("Person").unwrap();
@@ -1551,7 +1552,7 @@ mod tests {
     }
 
     fn run_query(
-        engine: &mut GraphEngine,
+        engine: &mut GraphEngine<crate::storage::pager_bridge::FilePager>,
         query: &str,
     ) -> QueryResult {
         let stmt = parse(query).unwrap();

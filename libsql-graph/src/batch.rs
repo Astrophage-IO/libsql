@@ -1,5 +1,6 @@
 use crate::error::GraphError;
 use crate::graph::GraphEngine;
+use crate::storage::pager::Pager;
 use crate::storage::property_store::PropertyValue;
 
 pub struct BatchNodeBuilder {
@@ -48,7 +49,7 @@ impl BatchNodeBuilder {
         self.entries.len()
     }
 
-    pub fn execute(self, engine: &mut GraphEngine) -> Result<Vec<u64>, GraphError> {
+    pub fn execute<P: Pager>(self, engine: &mut GraphEngine<P>) -> Result<Vec<u64>, GraphError> {
         let mut ids = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             let node_id = engine.create_node(&entry.label)?;
@@ -100,7 +101,7 @@ impl BatchRelBuilder {
         self.entries.len()
     }
 
-    pub fn execute(self, engine: &mut GraphEngine) -> Result<Vec<u64>, GraphError> {
+    pub fn execute<P: Pager>(self, engine: &mut GraphEngine<P>) -> Result<Vec<u64>, GraphError> {
         let mut ids = Vec::with_capacity(self.entries.len());
         for entry in &self.entries {
             let rel_id =

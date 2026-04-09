@@ -8,6 +8,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use crate::error::GraphError;
+use crate::storage::pager::Pager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TxState {
@@ -15,7 +16,7 @@ enum TxState {
     Write,
 }
 
-pub struct GraphPager {
+pub struct FilePager {
     file: File,
     page_size: usize,
     db_size: u32,
@@ -24,7 +25,7 @@ pub struct GraphPager {
     original_pages: HashMap<u32, Vec<u8>>,
 }
 
-impl GraphPager {
+impl FilePager {
     pub fn open(path: &str, page_size: u32) -> Result<Self, GraphError> {
         let p = Path::new(path);
         let file = OpenOptions::new()
@@ -52,15 +53,26 @@ impl GraphPager {
         })
     }
 
-    pub fn db_size(&self) -> u32 {
+    pub fn close(&mut self) -> Result<(), GraphError> {
+        if self.tx_state == TxState::Write {
+            self.rollback()?;
+        }
+        self.tx_state = TxState::None;
+        self.file.sync_all()?;
+        Ok(())
+    }
+}
+
+impl Pager for FilePager {
+    fn db_size(&self) -> u32 {
         self.db_size
     }
 
-    pub fn page_size(&self) -> usize {
+    fn page_size(&self) -> usize {
         self.page_size
     }
 
-    pub fn get_page(&mut self, pgno: u32) -> Result<PageHandle, GraphError> {
+    fn get_page(&mut self, pgno: u32) -> Result<PageHandle, GraphError> {
         if pgno == 0 || pgno > self.db_size {
             return Err(GraphError::InvalidPageNumber(pgno));
         }
@@ -85,7 +97,7 @@ impl GraphPager {
         })
     }
 
-    pub fn alloc_page(&mut self) -> Result<(u32, PageHandle), GraphError> {
+    fn alloc_page(&mut self) -> Result<(u32, PageHandle), GraphError> {
         if self.tx_state != TxState::Write {
             return Err(GraphError::NoTransaction);
         }
@@ -106,21 +118,7 @@ impl GraphPager {
         ))
     }
 
-    pub fn begin_read(&mut self) -> Result<(), GraphError> {
-        Ok(())
-    }
-
-    pub fn begin_write(&mut self) -> Result<(), GraphError> {
-        if self.tx_state == TxState::Write {
-            return Err(GraphError::TransactionActive);
-        }
-        self.tx_state = TxState::Write;
-        self.dirty_pages.clear();
-        self.original_pages.clear();
-        Ok(())
-    }
-
-    pub fn write_page(&mut self, handle: &PageHandle) -> Result<(), GraphError> {
+    fn write_page(&mut self, handle: &PageHandle) -> Result<(), GraphError> {
         if self.tx_state != TxState::Write {
             return Err(GraphError::NoTransaction);
         }
@@ -142,7 +140,21 @@ impl GraphPager {
         Ok(())
     }
 
-    pub fn commit(&mut self) -> Result<(), GraphError> {
+    fn begin_read(&mut self) -> Result<(), GraphError> {
+        Ok(())
+    }
+
+    fn begin_write(&mut self) -> Result<(), GraphError> {
+        if self.tx_state == TxState::Write {
+            return Err(GraphError::TransactionActive);
+        }
+        self.tx_state = TxState::Write;
+        self.dirty_pages.clear();
+        self.original_pages.clear();
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<(), GraphError> {
         if self.tx_state != TxState::Write {
             return Err(GraphError::NoTransaction);
         }
@@ -162,7 +174,7 @@ impl GraphPager {
         Ok(())
     }
 
-    pub fn rollback(&mut self) -> Result<(), GraphError> {
+    fn rollback(&mut self) -> Result<(), GraphError> {
         if self.tx_state != TxState::Write {
             return Err(GraphError::NoTransaction);
         }
@@ -179,18 +191,9 @@ impl GraphPager {
         self.tx_state = TxState::None;
         Ok(())
     }
-
-    pub fn close(&mut self) -> Result<(), GraphError> {
-        if self.tx_state == TxState::Write {
-            self.rollback()?;
-        }
-        self.tx_state = TxState::None;
-        self.file.sync_all()?;
-        Ok(())
-    }
 }
 
-impl Drop for GraphPager {
+impl Drop for FilePager {
     fn drop(&mut self) {
         let _ = self.close();
     }
@@ -203,6 +206,10 @@ pub struct PageHandle {
 }
 
 impl PageHandle {
+    pub fn new(data: Vec<u8>, pgno: u32, page_size: usize) -> Self {
+        Self { data, pgno, page_size }
+    }
+
     pub fn page_number(&self) -> u32 {
         self.pgno
     }
@@ -237,11 +244,11 @@ mod tests {
     fn test_pager_open_close() {
         let path = temp_path();
         {
-            let pager = GraphPager::open(&path, 4096).unwrap();
+            let pager = FilePager::open(&path, 4096).unwrap();
             assert_eq!(pager.db_size(), 0);
         }
         {
-            let pager = GraphPager::open(&path, 4096).unwrap();
+            let pager = FilePager::open(&path, 4096).unwrap();
             assert_eq!(pager.db_size(), 0);
         }
         let _ = std::fs::remove_file(&path);
@@ -253,7 +260,7 @@ mod tests {
         let pattern: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
 
         {
-            let mut pager = GraphPager::open(&path, 4096).unwrap();
+            let mut pager = FilePager::open(&path, 4096).unwrap();
             pager.begin_write().unwrap();
             let (pgno, mut handle) = pager.alloc_page().unwrap();
             assert_eq!(pgno, 1);
@@ -263,7 +270,7 @@ mod tests {
         }
 
         {
-            let mut pager = GraphPager::open(&path, 4096).unwrap();
+            let mut pager = FilePager::open(&path, 4096).unwrap();
             assert_eq!(pager.db_size(), 1);
             let handle = pager.get_page(1).unwrap();
             assert_eq!(handle.data(), &pattern[..]);
@@ -277,7 +284,7 @@ mod tests {
         let page_count = 100u32;
 
         {
-            let mut pager = GraphPager::open(&path, 4096).unwrap();
+            let mut pager = FilePager::open(&path, 4096).unwrap();
             pager.begin_write().unwrap();
             for i in 1..=page_count {
                 let (_pgno, mut handle) = pager.alloc_page().unwrap();
@@ -291,7 +298,7 @@ mod tests {
         }
 
         {
-            let mut pager = GraphPager::open(&path, 4096).unwrap();
+            let mut pager = FilePager::open(&path, 4096).unwrap();
             assert_eq!(pager.db_size(), page_count);
             for i in 1..=page_count {
                 let handle = pager.get_page(i).unwrap();
@@ -327,7 +334,7 @@ mod tests {
         let path = temp_path();
 
         {
-            let mut pager = GraphPager::open(&path, 4096).unwrap();
+            let mut pager = FilePager::open(&path, 4096).unwrap();
             pager.begin_write().unwrap();
             let (_pgno, mut handle) = pager.alloc_page().unwrap();
             handle.data_mut().unwrap()[0] = 0xAA;
@@ -336,7 +343,7 @@ mod tests {
         }
 
         {
-            let mut pager = GraphPager::open(&path, 4096).unwrap();
+            let mut pager = FilePager::open(&path, 4096).unwrap();
             assert_eq!(pager.db_size(), 1);
             pager.begin_write().unwrap();
 
@@ -353,7 +360,7 @@ mod tests {
         }
 
         {
-            let mut pager = GraphPager::open(&path, 4096).unwrap();
+            let mut pager = FilePager::open(&path, 4096).unwrap();
             let handle = pager.get_page(1).unwrap();
             assert_eq!(handle.data()[0], 0xAA);
         }
@@ -363,7 +370,7 @@ mod tests {
     #[test]
     fn test_page_handle_drop() {
         let path = temp_path();
-        let mut pager = GraphPager::open(&path, 4096).unwrap();
+        let mut pager = FilePager::open(&path, 4096).unwrap();
         pager.begin_write().unwrap();
 
         let (pgno, mut handle) = pager.alloc_page().unwrap();

@@ -1,6 +1,6 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 
 pub struct FreeSpaceManager {
     freemap_root: u32,
@@ -31,7 +31,7 @@ impl FreeSpaceManager {
 
     fn ensure_bitmap_page(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         bitmap_pgno: u32,
     ) -> Result<(), GraphError> {
         while pager.db_size() < bitmap_pgno {
@@ -50,7 +50,7 @@ impl FreeSpaceManager {
 
     pub fn mark_used(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         global_slot: u64,
     ) -> Result<(), GraphError> {
         let (bitmap_pgno, bit_offset) = self.bitmap_page_for_slot(global_slot);
@@ -69,7 +69,7 @@ impl FreeSpaceManager {
 
     pub fn mark_free(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         global_slot: u64,
     ) -> Result<(), GraphError> {
         let (bitmap_pgno, bit_offset) = self.bitmap_page_for_slot(global_slot);
@@ -90,7 +90,7 @@ impl FreeSpaceManager {
 
     pub fn is_used(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         global_slot: u64,
     ) -> Result<bool, GraphError> {
         let (bitmap_pgno, bit_offset) = self.bitmap_page_for_slot(global_slot);
@@ -108,7 +108,7 @@ impl FreeSpaceManager {
 
     pub fn find_free_slot(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         hint_start: u64,
         max_slots: u64,
     ) -> Result<Option<u64>, GraphError> {
@@ -124,6 +124,7 @@ impl FreeSpaceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pager_bridge::FilePager;
     use tempfile::NamedTempFile;
 
     fn temp_path() -> String {
@@ -133,8 +134,8 @@ mod tests {
         p
     }
 
-    fn setup_pager(path: &str) -> (GraphPager, u32) {
-        let mut pager = GraphPager::open(path, 4096).unwrap();
+    fn setup_pager(path: &str) -> (FilePager, u32) {
+        let mut pager = FilePager::open(path, 4096).unwrap();
         pager.begin_write().unwrap();
 
         let (_, mut header_page) = pager.alloc_page().unwrap();

@@ -1,6 +1,6 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 use crate::storage::record::{
     address_for_id, records_per_page, RecordAddress, PROPERTY_RECORD_SIZE,
 };
@@ -316,7 +316,7 @@ impl PropertyStore {
 
     fn ensure_page_exists(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: &RecordAddress,
     ) -> Result<(), GraphError> {
         while pager.db_size() < addr.page {
@@ -335,7 +335,7 @@ impl PropertyStore {
 
     pub fn create_record(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         prop_id: u64,
         record: &PropertyRecord,
     ) -> Result<RecordAddress, GraphError> {
@@ -358,7 +358,7 @@ impl PropertyStore {
 
     pub fn read_record(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: RecordAddress,
     ) -> Result<PropertyRecord, GraphError> {
         if addr.page > pager.db_size() {
@@ -375,7 +375,7 @@ impl PropertyStore {
 
     pub fn write_record(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: RecordAddress,
         record: &PropertyRecord,
     ) -> Result<(), GraphError> {
@@ -393,7 +393,7 @@ impl PropertyStore {
 
     pub fn get_property(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         first_prop: RecordAddress,
         key_token_id: u16,
     ) -> Result<Option<PropertyValue>, GraphError> {
@@ -413,7 +413,7 @@ impl PropertyStore {
 
     pub fn get_all_properties(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         first_prop: RecordAddress,
     ) -> Result<Vec<(u16, PropertyValue)>, GraphError> {
         let mut result = Vec::new();
@@ -438,6 +438,7 @@ impl PropertyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pager_bridge::FilePager;
     use tempfile::NamedTempFile;
 
     fn temp_path() -> String {
@@ -447,8 +448,8 @@ mod tests {
         p
     }
 
-    fn setup_pager(path: &str) -> (GraphPager, u32) {
-        let mut pager = GraphPager::open(path, 4096).unwrap();
+    fn setup_pager(path: &str) -> (FilePager, u32) {
+        let mut pager = FilePager::open(path, 4096).unwrap();
         pager.begin_write().unwrap();
 
         let (_, mut header_page) = pager.alloc_page().unwrap();

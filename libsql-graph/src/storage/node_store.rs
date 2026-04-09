@@ -1,6 +1,6 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
 use crate::storage::record::{
     address_for_id, records_per_page, RecordAddress, NODE_RECORD_SIZE,
 };
@@ -140,7 +140,7 @@ impl NodeStore {
 
     fn ensure_page_exists(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         addr: &RecordAddress,
     ) -> Result<(), GraphError> {
         while pager.db_size() < addr.page {
@@ -159,7 +159,7 @@ impl NodeStore {
 
     pub fn create_node(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_id: u64,
         record: &NodeRecord,
     ) -> Result<RecordAddress, GraphError> {
@@ -182,7 +182,7 @@ impl NodeStore {
 
     pub fn read_node(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_id: u64,
     ) -> Result<NodeRecord, GraphError> {
         let addr = self.address(node_id);
@@ -198,7 +198,7 @@ impl NodeStore {
 
     pub fn write_node(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_id: u64,
         record: &NodeRecord,
     ) -> Result<(), GraphError> {
@@ -217,7 +217,7 @@ impl NodeStore {
 
     pub fn delete_node(
         &self,
-        pager: &mut GraphPager,
+        pager: &mut impl Pager,
         node_id: u64,
     ) -> Result<(), GraphError> {
         let addr = self.address(node_id);
@@ -243,6 +243,7 @@ impl NodeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::pager_bridge::FilePager;
     use tempfile::NamedTempFile;
 
     fn temp_path() -> String {
@@ -252,8 +253,8 @@ mod tests {
         p
     }
 
-    fn setup_pager(path: &str) -> (GraphPager, u32) {
-        let mut pager = GraphPager::open(path, 4096).unwrap();
+    fn setup_pager(path: &str) -> (FilePager, u32) {
+        let mut pager = FilePager::open(path, 4096).unwrap();
         pager.begin_write().unwrap();
 
         let (_, mut header_page) = pager.alloc_page().unwrap();

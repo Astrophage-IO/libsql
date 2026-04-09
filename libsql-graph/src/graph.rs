@@ -5,6 +5,8 @@ use crate::cypher::explain;
 use crate::cypher::{parser, planner};
 use crate::error::GraphError;
 use crate::storage::database::GraphDatabase;
+use crate::storage::pager::Pager;
+use crate::storage::pager_bridge::FilePager;
 use crate::storage::node_store::{NodeRecord, NodeStore};
 use crate::storage::property_store::{
     PropertyBlock, PropertyRecord, PropertyStore, PropertyValue,
@@ -17,8 +19,10 @@ use crate::storage::token_store::{
     TokenRecord, TokenStore, TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE,
 };
 
-pub struct GraphEngine {
-    db: GraphDatabase,
+pub type DefaultGraphEngine = GraphEngine<FilePager>;
+
+pub struct GraphEngine<P: Pager> {
+    db: GraphDatabase<P>,
     node_store: NodeStore,
     rel_store: RelStore,
     token_store: TokenStore,
@@ -27,7 +31,7 @@ pub struct GraphEngine {
     rel_group_store: RelGroupStore,
 }
 
-impl GraphEngine {
+impl GraphEngine<FilePager> {
     pub fn create(path: &str, page_size: u32) -> Result<Self, GraphError> {
         let db = GraphDatabase::create(path, page_size)?;
         let ps = db.page_size() as usize;
@@ -58,6 +62,22 @@ impl GraphEngine {
             rel_group_store: RelGroupStore::new(ps),
             db,
         })
+    }
+}
+
+impl<P: Pager> GraphEngine<P> {
+    pub fn from_database(db: GraphDatabase<P>) -> Self {
+        let ps = db.page_size() as usize;
+        let h = db.header();
+        Self {
+            node_store: NodeStore::new(h.node_store_root, ps),
+            rel_store: RelStore::new(h.rel_store_root, ps),
+            token_store: TokenStore::new(h.token_store_root, ps),
+            property_store: PropertyStore::new(h.prop_store_root, ps),
+            string_overflow: StringOverflowStore::new(ps),
+            rel_group_store: RelGroupStore::new(ps),
+            db,
+        }
     }
 
     pub fn get_or_create_label(&mut self, name: &str) -> Result<u32, GraphError> {
@@ -708,7 +728,7 @@ impl GraphEngine {
         Ok(token.name_str().to_string())
     }
 
-    pub fn db(&mut self) -> &mut GraphDatabase {
+    pub fn db(&mut self) -> &mut GraphDatabase<P> {
         &mut self.db
     }
 
@@ -984,13 +1004,13 @@ impl std::fmt::Display for ProfileResult {
     }
 }
 
-pub struct TransactionBatch<'a> {
-    engine: &'a mut GraphEngine,
+pub struct TransactionBatch<'a, P: Pager> {
+    engine: &'a mut GraphEngine<P>,
     queries: Vec<(String, HashMap<String, Value>)>,
 }
 
-impl<'a> TransactionBatch<'a> {
-    pub fn new(engine: &'a mut GraphEngine) -> Self {
+impl<'a, P: Pager> TransactionBatch<'a, P> {
+    pub fn new(engine: &'a mut GraphEngine<P>) -> Self {
         Self {
             engine,
             queries: Vec::new(),
@@ -1629,5 +1649,39 @@ mod tests {
 
         drop(engine);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_mem_pager_engine() {
+        use crate::storage::database::GraphDatabase;
+        use crate::storage::mem_pager::MemPager;
+
+        let pager = MemPager::new(4096);
+        let db = GraphDatabase::from_pager(pager, 4096).unwrap();
+        let mut engine = GraphEngine::from_database(db);
+
+        let a = engine.create_node("Person").unwrap();
+        let b = engine.create_node("Person").unwrap();
+        engine
+            .set_node_property(a, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+        engine
+            .set_node_property(b, "name", PropertyValue::ShortString("Bob".into()))
+            .unwrap();
+        engine.create_relationship(a, b, "KNOWS").unwrap();
+
+        assert_eq!(engine.node_count(), 2);
+        assert_eq!(engine.edge_count(), 1);
+
+        let result = engine
+            .query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+        assert_eq!(result.rows[0][1], Value::String("Bob".into()));
+
+        let neighbors = engine.get_neighbors(a, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].0, b);
     }
 }

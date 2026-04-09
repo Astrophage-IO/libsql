@@ -1,5 +1,6 @@
 use crate::error::GraphError;
 use crate::graph::GraphEngine;
+use crate::storage::pager::Pager;
 
 #[derive(Debug, Default)]
 pub struct IntegrityReport {
@@ -36,7 +37,7 @@ impl IntegrityReport {
     }
 }
 
-pub fn check_integrity(engine: &mut GraphEngine) -> Result<IntegrityReport, GraphError> {
+pub fn check_integrity<P: Pager>(engine: &mut GraphEngine<P>) -> Result<IntegrityReport, GraphError> {
     let mut report = IntegrityReport::default();
 
     let stored_node_count = engine.node_count();
@@ -181,7 +182,7 @@ pub fn check_integrity(engine: &mut GraphEngine) -> Result<IntegrityReport, Grap
     Ok(report)
 }
 
-pub fn store_stats(engine: &mut GraphEngine) -> Result<StoreStats, GraphError> {
+pub fn store_stats<P: Pager>(engine: &mut GraphEngine<P>) -> Result<StoreStats, GraphError> {
     let h = engine.db().header().clone();
     let ps = engine.db().page_size() as usize;
     let db_size = engine.db().pager().db_size();

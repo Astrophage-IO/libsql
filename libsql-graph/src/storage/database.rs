@@ -1,17 +1,18 @@
 use crate::error::GraphError;
 use crate::storage::header::GraphHeader;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
-use crate::storage::pager_bridge::GraphPager;
+use crate::storage::pager::Pager;
+use crate::storage::pager_bridge::{FilePager, PageHandle};
 
-pub struct GraphDatabase {
-    pager: GraphPager,
+pub struct GraphDatabase<P: Pager> {
+    pager: P,
     header: GraphHeader,
     page_size: u32,
 }
 
-impl GraphDatabase {
+impl GraphDatabase<FilePager> {
     pub fn create(path: &str, page_size: u32) -> Result<Self, GraphError> {
-        let mut pager = GraphPager::open(path, page_size)?;
+        let mut pager = FilePager::open(path, page_size)?;
         pager.begin_write()?;
 
         let (_, mut header_page) = pager.alloc_page()?;
@@ -32,7 +33,7 @@ impl GraphDatabase {
         header.write(header_page.data_mut()?)?;
         pager.write_page(&header_page)?;
 
-        let root_pages: &mut [(&mut crate::storage::pager_bridge::PageHandle, PageType)] = &mut [
+        let root_pages: &mut [(&mut PageHandle, PageType)] = &mut [
             (&mut node_page, PageType::NodeStore),
             (&mut rel_page, PageType::RelStore),
             (&mut prop_page, PageType::PropertyStore),
@@ -60,7 +61,7 @@ impl GraphDatabase {
 
     pub fn open(path: &str) -> Result<Self, GraphError> {
         let page_size = Self::read_page_size(path)?;
-        let mut pager = GraphPager::open(path, page_size)?;
+        let mut pager = FilePager::open(path, page_size)?;
 
         if pager.db_size() < 1 {
             return Err(GraphError::CorruptPage(1));
@@ -84,6 +85,72 @@ impl GraphDatabase {
         f.seek(SeekFrom::Start(12))?;
         f.read_exact(&mut buf)?;
         Ok(u32::from_le_bytes(buf))
+    }
+}
+
+impl<P: Pager> GraphDatabase<P> {
+    pub fn from_pager(mut pager: P, page_size: u32) -> Result<Self, GraphError> {
+        pager.begin_write()?;
+
+        let (_, mut header_page) = pager.alloc_page()?;
+        let mut header = GraphHeader::new(page_size);
+
+        let (node_root, mut node_page) = pager.alloc_page()?;
+        let (rel_root, mut rel_page) = pager.alloc_page()?;
+        let (prop_root, mut prop_page) = pager.alloc_page()?;
+        let (token_root, mut token_page) = pager.alloc_page()?;
+        let (freemap_root, mut freemap_page) = pager.alloc_page()?;
+
+        header.node_store_root = node_root;
+        header.rel_store_root = rel_root;
+        header.prop_store_root = prop_root;
+        header.token_store_root = token_root;
+        header.freemap_root = freemap_root;
+
+        header.write(header_page.data_mut()?)?;
+        pager.write_page(&header_page)?;
+
+        let root_pages: &mut [(&mut PageHandle, PageType)] = &mut [
+            (&mut node_page, PageType::NodeStore),
+            (&mut rel_page, PageType::RelStore),
+            (&mut prop_page, PageType::PropertyStore),
+            (&mut token_page, PageType::TokenStore),
+            (&mut freemap_page, PageType::FreeBitmap),
+        ];
+        for (page, page_type) in root_pages.iter_mut() {
+            let ph = PageHeader {
+                page_type: *page_type as u8,
+                flags: 0,
+                record_count: 0,
+                next_page: 0,
+            };
+            ph.write(&mut page.data_mut()?[..PAGE_HEADER_SIZE]);
+            pager.write_page(page)?;
+        }
+
+        pager.commit()?;
+        Ok(Self {
+            pager,
+            header,
+            page_size,
+        })
+    }
+
+    pub fn open_pager(mut pager: P) -> Result<Self, GraphError> {
+        if pager.db_size() < 1 {
+            return Err(GraphError::CorruptPage(1));
+        }
+
+        let header_page = pager.get_page(1)?;
+        let header = GraphHeader::read(header_page.data())?;
+        header.validate()?;
+        let page_size = header.page_size;
+
+        Ok(Self {
+            pager,
+            header,
+            page_size,
+        })
     }
 
     pub fn flush_header(&mut self) -> Result<(), GraphError> {
@@ -127,7 +194,7 @@ impl GraphDatabase {
         &mut self.header
     }
 
-    pub fn pager(&mut self) -> &mut GraphPager {
+    pub fn pager(&mut self) -> &mut P {
         &mut self.pager
     }
 
