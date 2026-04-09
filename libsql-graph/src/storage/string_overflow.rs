@@ -44,8 +44,7 @@ impl StringOverflowStore {
             data[4..8].copy_from_slice(&chunk_len.to_le_bytes());
             data[8..12].copy_from_slice(&0u32.to_le_bytes());
 
-            data[OVERFLOW_HEADER_SIZE..OVERFLOW_HEADER_SIZE + chunk.len()]
-                .copy_from_slice(chunk);
+            data[OVERFLOW_HEADER_SIZE..OVERFLOW_HEADER_SIZE + chunk.len()].copy_from_slice(chunk);
 
             pager.write_page(&page)?;
 
@@ -84,10 +83,8 @@ impl StringOverflowStore {
             let page = pager.get_page(current_pgno)?;
             let data = page.data();
 
-            let chunk_len =
-                u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
-            let next_pgno =
-                u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+            let chunk_len = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+            let next_pgno = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
 
             let end = (OVERFLOW_HEADER_SIZE + chunk_len).min(data.len());
             result.extend_from_slice(&data[OVERFLOW_HEADER_SIZE..end]);
@@ -95,7 +92,8 @@ impl StringOverflowStore {
             current_pgno = next_pgno;
         }
 
-        String::from_utf8(result).map_err(|_| GraphError::PagerError("invalid UTF-8 in overflow".into()))
+        String::from_utf8(result)
+            .map_err(|_| GraphError::PagerError("invalid UTF-8 in overflow".into()))
     }
 
     pub fn delete_string(
@@ -111,8 +109,7 @@ impl StringOverflowStore {
         while current_pgno != 0 && current_pgno <= pager.db_size() {
             let page = pager.get_page(current_pgno)?;
             let data = page.data();
-            let next_pgno =
-                u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+            let next_pgno = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
 
             let mut page = pager.get_page(current_pgno)?;
             page.data_mut()?[0..OVERFLOW_HEADER_SIZE].fill(0);

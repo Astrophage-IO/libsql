@@ -1,5 +1,5 @@
-use libsql_graph::prelude::*;
 use libsql_graph::integrity::{check_integrity, IntegrityError};
+use libsql_graph::prelude::*;
 
 fn temp_path() -> String {
     let f = tempfile::NamedTempFile::new().unwrap();
@@ -149,7 +149,11 @@ fn test_delete_already_deleted_node() {
     assert_eq!(engine.node_count(), 0);
 
     let result = engine.detach_delete_node(0);
-    assert!(result.is_ok(), "deleting already-deleted node should be a no-op, got: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "deleting already-deleted node should be a no-op, got: {:?}",
+        result
+    );
 
     assert_eq!(engine.node_count(), 0);
 
@@ -162,7 +166,9 @@ fn test_cypher_detach_delete() {
     let path = temp_path();
     let mut engine = GraphEngine::create(&path, 4096).unwrap();
 
-    engine.query("CREATE (p:Person {name: 'ToDelete'})").unwrap();
+    engine
+        .query("CREATE (p:Person {name: 'ToDelete'})")
+        .unwrap();
     engine.query("CREATE (q:Person {name: 'Keeper'})").unwrap();
     engine.create_relationship(0, 1, "KNOWS").unwrap();
     assert_eq!(engine.node_count(), 2);
@@ -175,9 +181,7 @@ fn test_cypher_detach_delete() {
     assert_eq!(engine.node_count(), 1);
     assert_eq!(engine.edge_count(), 0);
 
-    let remaining = engine
-        .query("MATCH (p:Person) RETURN p.name")
-        .unwrap();
+    let remaining = engine.query("MATCH (p:Person) RETURN p.name").unwrap();
     assert_eq!(remaining.rows.len(), 1);
 
     drop(engine);

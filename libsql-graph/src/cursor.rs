@@ -88,11 +88,7 @@ pub struct RelChainCursor {
 }
 
 impl RelChainCursor {
-    pub fn new(
-        first_rel: RecordAddress,
-        anchor_addr: RecordAddress,
-        direction: Direction,
-    ) -> Self {
+    pub fn new(first_rel: RecordAddress, anchor_addr: RecordAddress, direction: Direction) -> Self {
         Self {
             current_rel: first_rel,
             anchor_addr,
@@ -346,8 +342,8 @@ pub fn dijkstra(
     weight_property_token: Option<u16>,
     property_store: Option<&crate::storage::property_store::PropertyStore>,
 ) -> Result<Option<(Vec<u64>, f64)>, GraphError> {
-    use std::collections::{BinaryHeap, HashMap};
     use std::cmp::Ordering;
+    use std::collections::{BinaryHeap, HashMap};
 
     #[derive(Debug)]
     struct State {
@@ -370,7 +366,10 @@ pub fn dijkstra(
 
     impl Ord for State {
         fn cmp(&self, other: &Self) -> Ordering {
-            other.cost.partial_cmp(&self.cost).unwrap_or(Ordering::Equal)
+            other
+                .cost
+                .partial_cmp(&self.cost)
+                .unwrap_or(Ordering::Equal)
         }
     }
 
@@ -425,24 +424,23 @@ pub fn dijkstra(
             let neighbor_id =
                 (neighbor_addr.page - store_root) as u64 * rpp + neighbor_addr.slot as u64;
 
-            let edge_weight = if let (Some(token), Some(ps)) =
-                (weight_property_token, property_store)
-            {
-                if !rel.first_prop.is_null() {
-                    ps.get_property(pager, rel.first_prop, token)?
-                        .map(|pv| match pv {
-                            crate::storage::property_store::PropertyValue::Int32(n) => n as f64,
-                            crate::storage::property_store::PropertyValue::Int64(n) => n as f64,
-                            crate::storage::property_store::PropertyValue::Float64(f) => f,
-                            _ => 1.0,
-                        })
-                        .unwrap_or(1.0)
+            let edge_weight =
+                if let (Some(token), Some(ps)) = (weight_property_token, property_store) {
+                    if !rel.first_prop.is_null() {
+                        ps.get_property(pager, rel.first_prop, token)?
+                            .map(|pv| match pv {
+                                crate::storage::property_store::PropertyValue::Int32(n) => n as f64,
+                                crate::storage::property_store::PropertyValue::Int64(n) => n as f64,
+                                crate::storage::property_store::PropertyValue::Float64(f) => f,
+                                _ => 1.0,
+                            })
+                            .unwrap_or(1.0)
+                    } else {
+                        1.0
+                    }
                 } else {
                     1.0
-                }
-            } else {
-                1.0
-            };
+                };
 
             let new_cost = cost + edge_weight;
             if new_cost < *dist.get(&neighbor_id).unwrap_or(&f64::INFINITY) {
@@ -538,7 +536,10 @@ mod tests {
         );
 
         let mut person_ids = Vec::new();
-        if cursor.scan_label(engine.db().pager(), &node_store, person_label).unwrap() {
+        if cursor
+            .scan_label(engine.db().pager(), &node_store, person_label)
+            .unwrap()
+        {
             person_ids.push(cursor.current_id());
             while cursor
                 .next_with_label(engine.db().pager(), &node_store, person_label)
@@ -564,8 +565,9 @@ mod tests {
         let alice = engine.get_node(0).unwrap();
         let anchor = node_store.address(0);
         let mut cursor = RelChainCursor::new(alice.first_rel, anchor, Direction::Outgoing);
-        let neighbors =
-            cursor.collect_neighbors(engine.db().pager(), &rel_store, &node_store).unwrap();
+        let neighbors = cursor
+            .collect_neighbors(engine.db().pager(), &rel_store, &node_store)
+            .unwrap();
 
         assert_eq!(neighbors.len(), 2);
         let ids: Vec<u64> = neighbors.iter().map(|n| n.neighbor_id).collect();
@@ -650,15 +652,8 @@ mod tests {
         let node_store = NodeStore::new(engine.db().header().node_store_root, 4096);
         let rel_store = RelStore::new(engine.db().header().rel_store_root, 4096);
 
-        let path_result = shortest_path(
-            engine.db().pager(),
-            &node_store,
-            &rel_store,
-            0,
-            4,
-            10,
-        )
-        .unwrap();
+        let path_result =
+            shortest_path(engine.db().pager(), &node_store, &rel_store, 0, 4, 10).unwrap();
 
         assert!(path_result.is_some());
         let p = path_result.unwrap();
@@ -678,15 +673,7 @@ mod tests {
         let node_store = NodeStore::new(engine.db().header().node_store_root, 4096);
         let rel_store = RelStore::new(engine.db().header().rel_store_root, 4096);
 
-        let result = shortest_path(
-            engine.db().pager(),
-            &node_store,
-            &rel_store,
-            2,
-            2,
-            10,
-        )
-        .unwrap();
+        let result = shortest_path(engine.db().pager(), &node_store, &rel_store, 2, 2, 10).unwrap();
         assert_eq!(result, Some(vec![2]));
 
         drop(engine);
@@ -703,15 +690,7 @@ mod tests {
         let node_store = NodeStore::new(engine.db().header().node_store_root, 4096);
         let rel_store = RelStore::new(engine.db().header().rel_store_root, 4096);
 
-        let result = shortest_path(
-            engine.db().pager(),
-            &node_store,
-            &rel_store,
-            0,
-            1,
-            10,
-        )
-        .unwrap();
+        let result = shortest_path(engine.db().pager(), &node_store, &rel_store, 0, 1, 10).unwrap();
         assert_eq!(result, None);
 
         drop(engine);

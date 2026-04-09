@@ -52,9 +52,7 @@ pub fn estimate_step_cost_with_label_id(
 ) -> CostEstimate {
     match step {
         PlanStep::NodeScan { label: Some(_), .. } => {
-            let count = label_id
-                .map(|id| stats.label_count_for_id(id))
-                .unwrap_or(0);
+            let count = label_id.map(|id| stats.label_count_for_id(id)).unwrap_or(0);
             CostEstimate {
                 estimated_rows: count as f64,
                 estimated_cost: count as f64,

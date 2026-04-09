@@ -1,9 +1,7 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
 use crate::storage::pager::Pager;
-use crate::storage::record::{
-    address_for_id, records_per_page, RecordAddress, NODE_RECORD_SIZE,
-};
+use crate::storage::record::{address_for_id, records_per_page, RecordAddress, NODE_RECORD_SIZE};
 
 pub const NODE_FLAG_IN_USE: u8 = 0b1000_0000;
 pub const NODE_FLAG_DENSE: u8 = 0b0100_0000;
@@ -63,8 +61,7 @@ impl NodeRecord {
     }
 
     pub fn read(data: &[u8]) -> Self {
-        let label_token_id =
-            u32::from_le_bytes([data[1], data[2], data[3], 0]);
+        let label_token_id = u32::from_le_bytes([data[1], data[2], data[3], 0]);
 
         Self {
             flags: data[0],
@@ -215,11 +212,7 @@ impl NodeStore {
         Ok(())
     }
 
-    pub fn delete_node(
-        &self,
-        pager: &mut impl Pager,
-        node_id: u64,
-    ) -> Result<(), GraphError> {
+    pub fn delete_node(&self, pager: &mut impl Pager, node_id: u64) -> Result<(), GraphError> {
         let addr = self.address(node_id);
         if addr.page > pager.db_size() {
             return Err(GraphError::InvalidPageNumber(addr.page));

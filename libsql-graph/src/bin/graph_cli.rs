@@ -1,6 +1,6 @@
-use std::io::{self, BufRead, Write};
-use libsql_graph::prelude::*;
 use libsql_graph::cypher::executor::Value;
+use libsql_graph::prelude::*;
+use std::io::{self, BufRead, Write};
 
 fn value_to_json(v: &Value) -> String {
     match v {
@@ -71,27 +71,51 @@ fn main() {
     }
 }
 
-fn run_create_rel(engine: &mut GraphEngine<libsql_graph::storage::pager_bridge::FilePager>, args: &str) {
+fn run_create_rel(
+    engine: &mut GraphEngine<libsql_graph::storage::pager_bridge::FilePager>,
+    args: &str,
+) {
     let parts: Vec<&str> = args.splitn(3, ' ').collect();
     if parts.len() < 3 {
         println!("{{\"error\":\"usage: !rel <src_id> <dst_id> <type>\"}}");
         return;
     }
-    let src: u64 = match parts[0].parse() { Ok(v) => v, Err(_) => { println!("{{\"error\":\"invalid src_id\"}}"); return; } };
-    let dst: u64 = match parts[1].parse() { Ok(v) => v, Err(_) => { println!("{{\"error\":\"invalid dst_id\"}}"); return; } };
+    let src: u64 = match parts[0].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            println!("{{\"error\":\"invalid src_id\"}}");
+            return;
+        }
+    };
+    let dst: u64 = match parts[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            println!("{{\"error\":\"invalid dst_id\"}}");
+            return;
+        }
+    };
     match engine.create_relationship(src, dst, parts[2]) {
         Ok(rel_id) => println!("{{\"rel_id\":{rel_id}}}"),
         Err(e) => println!("{{\"error\":\"{e}\"}}"),
     }
 }
 
-fn run_set_prop(engine: &mut GraphEngine<libsql_graph::storage::pager_bridge::FilePager>, args: &str) {
+fn run_set_prop(
+    engine: &mut GraphEngine<libsql_graph::storage::pager_bridge::FilePager>,
+    args: &str,
+) {
     let parts: Vec<&str> = args.splitn(4, ' ').collect();
     if parts.len() < 4 {
         println!("{{\"error\":\"usage: !prop node|rel <id> <key> <value>\"}}");
         return;
     }
-    let id: u64 = match parts[1].parse() { Ok(v) => v, Err(_) => { println!("{{\"error\":\"invalid id\"}}"); return; } };
+    let id: u64 = match parts[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            println!("{{\"error\":\"invalid id\"}}");
+            return;
+        }
+    };
     let value = libsql_graph::PropertyValue::ShortString(parts[3].to_string());
     let result = if parts[0] == "node" {
         engine.set_node_property(id, parts[2], value)
@@ -104,14 +128,22 @@ fn run_set_prop(engine: &mut GraphEngine<libsql_graph::storage::pager_bridge::Fi
     }
 }
 
-fn run_query(engine: &mut GraphEngine<libsql_graph::storage::pager_bridge::FilePager>, cypher: &str) {
+fn run_query(
+    engine: &mut GraphEngine<libsql_graph::storage::pager_bridge::FilePager>,
+    cypher: &str,
+) {
     match engine.query(cypher) {
         Ok(result) => {
-            let rows_json: Vec<String> = result.rows.iter().map(|row| {
-                let cells: Vec<String> = row.iter().map(value_to_json).collect();
-                format!("[{}]", cells.join(","))
-            }).collect();
-            let cols_json: Vec<String> = result.columns.iter().map(|c| format!("\"{c}\"")).collect();
+            let rows_json: Vec<String> = result
+                .rows
+                .iter()
+                .map(|row| {
+                    let cells: Vec<String> = row.iter().map(value_to_json).collect();
+                    format!("[{}]", cells.join(","))
+                })
+                .collect();
+            let cols_json: Vec<String> =
+                result.columns.iter().map(|c| format!("\"{c}\"")).collect();
             println!("{{\"columns\":[{}],\"rows\":[{}],\"stats\":{{\"nodes_created\":{},\"relationships_created\":{},\"properties_set\":{},\"nodes_deleted\":{}}}}}",
                 cols_json.join(","),
                 rows_json.join(","),

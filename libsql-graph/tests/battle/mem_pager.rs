@@ -1,9 +1,9 @@
-use libsql_graph::storage::mem_pager::MemPager;
-use libsql_graph::storage::database::GraphDatabase;
-use libsql_graph::graph::{GraphEngine, TransactionBatch, Direction};
 use libsql_graph::cypher::executor::Value;
-use libsql_graph::storage::property_store::PropertyValue;
+use libsql_graph::graph::{Direction, GraphEngine, TransactionBatch};
+use libsql_graph::storage::database::GraphDatabase;
+use libsql_graph::storage::mem_pager::MemPager;
 use libsql_graph::storage::pager::Pager;
+use libsql_graph::storage::property_store::PropertyValue;
 
 fn mem_engine() -> GraphEngine<MemPager> {
     let pager = MemPager::new(4096);
@@ -21,7 +21,11 @@ fn test_create_50_nodes_with_properties() {
         assert_eq!(nid, i);
 
         engine
-            .set_node_property(nid, "name", PropertyValue::ShortString(format!("node_{}", i)))
+            .set_node_property(
+                nid,
+                "name",
+                PropertyValue::ShortString(format!("node_{}", i)),
+            )
             .unwrap();
         engine
             .set_node_property(nid, "index", PropertyValue::Int32(i as i32))
@@ -100,9 +104,7 @@ fn test_cypher_create_match_where_return() {
     engine
         .query("CREATE (c:Person {name: 'Charlie', age: 35})")
         .unwrap();
-    engine
-        .query("CREATE (d:Company {name: 'Acme'})")
-        .unwrap();
+    engine.query("CREATE (d:Company {name: 'Acme'})").unwrap();
 
     assert_eq!(engine.node_count(), 4);
 
@@ -149,9 +151,7 @@ fn test_cypher_aggregations() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][1], Value::Integer(2));
 
-    let result = engine
-        .query("MATCH (a:Person) RETURN avg(a.age)")
-        .unwrap();
+    let result = engine.query("MATCH (a:Person) RETURN avg(a.age)").unwrap();
     assert_eq!(result.rows[0][0], Value::Float(30.0));
 
     let result = engine
@@ -161,9 +161,7 @@ fn test_cypher_aggregations() {
     assert_eq!(result.rows[0][1], Value::Integer(35));
     assert_eq!(result.rows[0][2], Value::Integer(90));
 
-    let result = engine
-        .query("MATCH (a:Person) RETURN count(*)")
-        .unwrap();
+    let result = engine.query("MATCH (a:Person) RETURN count(*)").unwrap();
     assert_eq!(result.rows[0][0], Value::Integer(3));
 
     println!("[PASS] count, avg, min, max, sum all work on MemPager");
@@ -184,7 +182,11 @@ fn test_transaction_rollback() {
     assert_eq!(engine.node_count(), 5);
     engine.rollback().unwrap();
 
-    assert_eq!(engine.node_count(), 2, "rollback must restore node_count to 2");
+    assert_eq!(
+        engine.node_count(),
+        2,
+        "rollback must restore node_count to 2"
+    );
 
     let node = engine.get_node(0).unwrap();
     assert!(node.in_use(), "pre-existing node 0 must survive rollback");
@@ -249,15 +251,9 @@ fn test_transaction_batch_rollback_on_error() {
 fn test_cypher_detach_delete() {
     let mut engine = mem_engine();
 
-    engine
-        .query("CREATE (a:Person {name: 'Alice'})")
-        .unwrap();
-    engine
-        .query("CREATE (b:Person {name: 'Bob'})")
-        .unwrap();
-    engine
-        .query("CREATE (c:Person {name: 'Charlie'})")
-        .unwrap();
+    engine.query("CREATE (a:Person {name: 'Alice'})").unwrap();
+    engine.query("CREATE (b:Person {name: 'Bob'})").unwrap();
+    engine.query("CREATE (c:Person {name: 'Charlie'})").unwrap();
 
     engine.create_relationship(0, 1, "KNOWS").unwrap();
     engine.create_relationship(1, 2, "KNOWS").unwrap();
@@ -322,7 +318,11 @@ fn test_rollback_restores_page_allocations() {
         let label = if i % 2 == 0 { "TypeA" } else { "TypeB" };
         let nid = engine.create_node(label).unwrap();
         engine
-            .set_node_property(nid, "payload", PropertyValue::ShortString(format!("data_{}_padding_for_size", i)))
+            .set_node_property(
+                nid,
+                "payload",
+                PropertyValue::ShortString(format!("data_{}_padding_for_size", i)),
+            )
             .unwrap();
     }
     for i in 0u64..199 {
@@ -347,8 +347,16 @@ fn test_rollback_restores_page_allocations() {
         db_size_after, db_size_before
     );
 
-    assert_eq!(engine.node_count(), 0, "node_count must be 0 after rollback");
-    assert_eq!(engine.edge_count(), 0, "edge_count must be 0 after rollback");
+    assert_eq!(
+        engine.node_count(),
+        0,
+        "node_count must be 0 after rollback"
+    );
+    assert_eq!(
+        engine.edge_count(),
+        0,
+        "edge_count must be 0 after rollback"
+    );
 
     println!("[PASS] rollback restores page allocations (db_size resets) on MemPager");
 }

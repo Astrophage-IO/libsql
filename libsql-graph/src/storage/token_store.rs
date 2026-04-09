@@ -1,9 +1,7 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
 use crate::storage::pager::Pager;
-use crate::storage::record::{
-    address_for_id, records_per_page, RecordAddress, TOKEN_RECORD_SIZE,
-};
+use crate::storage::record::{address_for_id, records_per_page, RecordAddress, TOKEN_RECORD_SIZE};
 
 pub const TOKEN_FLAG_IN_USE: u8 = 0b1000_0000;
 pub const TOKEN_KIND_LABEL: u8 = 0;

@@ -173,9 +173,7 @@ fn is_scan_step(step: &PlanStep) -> bool {
 
 fn scan_label_name(step: &PlanStep) -> Option<&str> {
     match step {
-        PlanStep::NodeScan {
-            label: Some(l), ..
-        } => Some(l.as_str()),
+        PlanStep::NodeScan { label: Some(l), .. } => Some(l.as_str()),
         PlanStep::IndexedNodeScan { label, .. } => Some(label.as_str()),
         _ => None,
     }
@@ -384,12 +382,7 @@ mod tests {
             ],
         };
 
-        let optimized = optimize(
-            plan,
-            &GraphStats::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let optimized = optimize(plan, &GraphStats::new(), &HashMap::new(), &HashMap::new());
         assert!(matches!(&optimized.steps[0], PlanStep::NodeScan { .. }));
         assert!(matches!(&optimized.steps[1], PlanStep::Filter { .. }));
         assert!(matches!(&optimized.steps[2], PlanStep::Expand { .. }));
@@ -506,12 +499,7 @@ mod tests {
             ],
         };
 
-        let optimized = optimize(
-            plan,
-            &GraphStats::new(),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let optimized = optimize(plan, &GraphStats::new(), &HashMap::new(), &HashMap::new());
         assert!(matches!(&optimized.steps[0], PlanStep::NodeScan { .. }));
         assert!(matches!(&optimized.steps[1], PlanStep::Expand { .. }));
         assert!(matches!(&optimized.steps[2], PlanStep::Filter { .. }));

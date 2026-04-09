@@ -10,7 +10,8 @@ fn temp_path() -> String {
 
 fn label_id(engine: &mut DefaultGraphEngine, name: &str) -> u32 {
     let map = engine.label_name_to_id();
-    *map.get(name).unwrap_or_else(|| panic!("label '{name}' not found in label_name_to_id"))
+    *map.get(name)
+        .unwrap_or_else(|| panic!("label '{name}' not found in label_name_to_id"))
 }
 
 fn rel_type_id(engine: &mut DefaultGraphEngine, name: &str) -> u32 {
@@ -50,8 +51,14 @@ fn test_label_counts_after_bulk_create() {
     assert_eq!(engine.node_count(), 110);
 
     let stats = engine.stats().clone();
-    assert_eq!(stats.label_counts.get(&person_tok).copied().unwrap_or(0), 100);
-    assert_eq!(stats.label_counts.get(&company_tok).copied().unwrap_or(0), 10);
+    assert_eq!(
+        stats.label_counts.get(&person_tok).copied().unwrap_or(0),
+        100
+    );
+    assert_eq!(
+        stats.label_counts.get(&company_tok).copied().unwrap_or(0),
+        10
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
@@ -94,8 +101,18 @@ fn test_rel_type_counts_after_bulk_create() {
     let knows_tok = rel_type_id(&mut engine, "KNOWS");
     let works_at_tok = rel_type_id(&mut engine, "WORKS_AT");
     let stats = engine.stats().clone();
-    assert_eq!(stats.rel_type_counts.get(&knows_tok).copied().unwrap_or(0), 200);
-    assert_eq!(stats.rel_type_counts.get(&works_at_tok).copied().unwrap_or(0), 50);
+    assert_eq!(
+        stats.rel_type_counts.get(&knows_tok).copied().unwrap_or(0),
+        200
+    );
+    assert_eq!(
+        stats
+            .rel_type_counts
+            .get(&works_at_tok)
+            .copied()
+            .unwrap_or(0),
+        50
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
@@ -142,17 +159,19 @@ fn test_label_counts_after_delete() {
 
     let mut pb = BatchNodeBuilder::new();
     for i in 0u64..100 {
-        pb = pb.add_with_props("Person", vec![
-            ("name", PropertyValue::ShortString(format!("p{i}"))),
-        ]);
+        pb = pb.add_with_props(
+            "Person",
+            vec![("name", PropertyValue::ShortString(format!("p{i}")))],
+        );
     }
     pb.execute(&mut engine).unwrap();
 
     let mut cb = BatchNodeBuilder::new();
     for i in 0u64..10 {
-        cb = cb.add_with_props("Company", vec![
-            ("name", PropertyValue::ShortString(format!("c{i}"))),
-        ]);
+        cb = cb.add_with_props(
+            "Company",
+            vec![("name", PropertyValue::ShortString(format!("c{i}")))],
+        );
     }
     cb.execute(&mut engine).unwrap();
 
@@ -165,8 +184,14 @@ fn test_label_counts_after_delete() {
 
     let stats = engine.stats().clone();
     assert_eq!(stats.node_count, 90);
-    assert_eq!(stats.label_counts.get(&person_tok).copied().unwrap_or(0), 80);
-    assert_eq!(stats.label_counts.get(&company_tok).copied().unwrap_or(0), 10);
+    assert_eq!(
+        stats.label_counts.get(&person_tok).copied().unwrap_or(0),
+        80
+    );
+    assert_eq!(
+        stats.label_counts.get(&company_tok).copied().unwrap_or(0),
+        10
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
@@ -211,10 +236,19 @@ fn test_stats_persistence_across_close_reopen() {
         assert_eq!(stats.node_count, 55, "node_count after reopen");
         assert_eq!(stats.edge_count, 30, "edge_count after reopen");
         assert_eq!(stats.label_counts.len(), 2, "should have 2 label types");
-        assert_eq!(stats.label_counts.get(&person_tok).copied().unwrap_or(0), 50);
-        assert_eq!(stats.label_counts.get(&company_tok).copied().unwrap_or(0), 5);
+        assert_eq!(
+            stats.label_counts.get(&person_tok).copied().unwrap_or(0),
+            50
+        );
+        assert_eq!(
+            stats.label_counts.get(&company_tok).copied().unwrap_or(0),
+            5
+        );
         assert_eq!(stats.rel_type_counts.len(), 1, "should have 1 rel type");
-        assert_eq!(stats.rel_type_counts.get(&knows_tok).copied().unwrap_or(0), 30);
+        assert_eq!(
+            stats.rel_type_counts.get(&knows_tok).copied().unwrap_or(0),
+            30
+        );
         drop(engine);
     }
 
@@ -228,15 +262,14 @@ fn test_explain_output_has_cost_and_scan() {
 
     let mut nb = BatchNodeBuilder::new();
     for i in 0u64..20 {
-        nb = nb.add_with_props("Person", vec![
-            ("name", PropertyValue::ShortString(format!("p{i}"))),
-        ]);
+        nb = nb.add_with_props(
+            "Person",
+            vec![("name", PropertyValue::ShortString(format!("p{i}")))],
+        );
     }
     nb.execute(&mut engine).unwrap();
 
-    let plan = engine
-        .explain("MATCH (p:Person) RETURN p.name")
-        .unwrap();
+    let plan = engine.explain("MATCH (p:Person) RETURN p.name").unwrap();
     println!("EXPLAIN output:\n{plan}");
 
     assert!(
@@ -263,15 +296,14 @@ fn test_profile_returns_timing_and_results() {
 
     let mut nb = BatchNodeBuilder::new();
     for i in 0u64..10 {
-        nb = nb.add_with_props("Person", vec![
-            ("name", PropertyValue::ShortString(format!("p{i}"))),
-        ]);
+        nb = nb.add_with_props(
+            "Person",
+            vec![("name", PropertyValue::ShortString(format!("p{i}")))],
+        );
     }
     nb.execute(&mut engine).unwrap();
 
-    let profile = engine
-        .profile("MATCH (p:Person) RETURN p.name")
-        .unwrap();
+    let profile = engine.profile("MATCH (p:Person) RETURN p.name").unwrap();
     println!("PROFILE output:\n{profile}");
 
     assert!(profile.total_time_us > 0, "total_time should be > 0");
@@ -300,14 +332,16 @@ fn test_optimizer_transparency_works_at_query() {
 
     let mut nb = BatchNodeBuilder::new();
     for i in 0u64..20 {
-        nb = nb.add_with_props("Person", vec![
-            ("name", PropertyValue::ShortString(format!("person_{i}"))),
-        ]);
+        nb = nb.add_with_props(
+            "Person",
+            vec![("name", PropertyValue::ShortString(format!("person_{i}")))],
+        );
     }
     for i in 0u64..5 {
-        nb = nb.add_with_props("Company", vec![
-            ("name", PropertyValue::ShortString(format!("company_{i}"))),
-        ]);
+        nb = nb.add_with_props(
+            "Company",
+            vec![("name", PropertyValue::ShortString(format!("company_{i}")))],
+        );
     }
     nb.execute(&mut engine).unwrap();
 

@@ -37,7 +37,9 @@ impl IntegrityReport {
     }
 }
 
-pub fn check_integrity<P: Pager>(engine: &mut GraphEngine<P>) -> Result<IntegrityReport, GraphError> {
+pub fn check_integrity<P: Pager>(
+    engine: &mut GraphEngine<P>,
+) -> Result<IntegrityReport, GraphError> {
     let mut report = IntegrityReport::default();
 
     let stored_node_count = engine.node_count();

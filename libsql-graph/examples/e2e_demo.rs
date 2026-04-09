@@ -28,7 +28,10 @@ fn main() {
 
     for q in &queries {
         let r = engine.query(q).unwrap();
-        println!("  {} -> nodes_created={}, props_set={}", q, r.stats.nodes_created, r.stats.properties_set);
+        println!(
+            "  {} -> nodes_created={}, props_set={}",
+            q, r.stats.nodes_created, r.stats.properties_set
+        );
     }
 
     engine.commit().unwrap();
@@ -69,7 +72,9 @@ fn main() {
 
     // Query 1: Find all people
     println!("Query: MATCH (p:Person) RETURN p.name, p.age");
-    let result = engine.query("MATCH (p:Person) RETURN p.name, p.age").unwrap();
+    let result = engine
+        .query("MATCH (p:Person) RETURN p.name, p.age")
+        .unwrap();
     println!("  Columns: {:?}", result.columns);
     for row in &result.rows {
         println!("  {:?}", row);
@@ -78,7 +83,9 @@ fn main() {
 
     // Query 2: Who does Alice know?
     println!("Query: MATCH (a:Person {{name: 'Alice'}})-[:KNOWS]->(b) RETURN b.name");
-    let result = engine.query("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name").unwrap();
+    let result = engine
+        .query("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name")
+        .unwrap();
     println!("  Alice knows:");
     for row in &result.rows {
         println!("    - {:?}", row[0]);
@@ -96,7 +103,9 @@ fn main() {
 
     // Query 4: Who works where?
     println!("Query: MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name, c.name");
-    let result = engine.query("MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name, c.name").unwrap();
+    let result = engine
+        .query("MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name, c.name")
+        .unwrap();
     for row in &result.rows {
         println!("  {} works at {}", row[0], row[1]);
     }
@@ -104,7 +113,9 @@ fn main() {
 
     // Query 5: Count people per city
     println!("Query: MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN c.name, count(p)");
-    let result = engine.query("MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN c.name, count(p)").unwrap();
+    let result = engine
+        .query("MATCH (p:Person)-[:LIVES_IN]->(c:City) RETURN c.name, count(p)")
+        .unwrap();
     for row in &result.rows {
         println!("  {} has {} residents", row[0], row[1]);
     }
@@ -112,26 +123,44 @@ fn main() {
 
     // Query 6: Aggregation — average age
     println!("Query: MATCH (p:Person) RETURN count(p), avg(p.age)");
-    let result = engine.query("MATCH (p:Person) RETURN count(p), avg(p.age)").unwrap();
-    println!("  People: {}, Avg age: {}", result.rows[0][0], result.rows[0][1]);
+    let result = engine
+        .query("MATCH (p:Person) RETURN count(p), avg(p.age)")
+        .unwrap();
+    println!(
+        "  People: {}, Avg age: {}",
+        result.rows[0][0], result.rows[0][1]
+    );
     println!();
 
     // --- Phase 4: EXPLAIN with optimizer ---
     println!("--- Phase 4: Query Plan ---\n");
-    let plan = engine.explain("MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name, c.name").unwrap();
+    let plan = engine
+        .explain("MATCH (p:Person)-[:WORKS_AT]->(c:Company) RETURN p.name, c.name")
+        .unwrap();
     println!("{}", plan);
 
     // --- Phase 5: Profile ---
     println!("--- Phase 5: Profile ---\n");
-    let profile = engine.profile("MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN p.name, f.name").unwrap();
+    let profile = engine
+        .profile("MATCH (p:Person)-[:KNOWS]->(f:Person) RETURN p.name, f.name")
+        .unwrap();
     println!("{}", profile);
 
     // --- Phase 6: Schema ---
     println!("--- Phase 6: Schema ---\n");
     let schema = engine.schema().unwrap();
-    println!("  Nodes: {}, Edges: {}", schema.node_count, schema.edge_count);
-    println!("  Labels: {:?}", schema.labels.iter().map(|l| &l.name).collect::<Vec<_>>());
-    println!("  Rel types: {:?}", schema.rel_types.iter().map(|r| &r.name).collect::<Vec<_>>());
+    println!(
+        "  Nodes: {}, Edges: {}",
+        schema.node_count, schema.edge_count
+    );
+    println!(
+        "  Labels: {:?}",
+        schema.labels.iter().map(|l| &l.name).collect::<Vec<_>>()
+    );
+    println!(
+        "  Rel types: {:?}",
+        schema.rel_types.iter().map(|r| &r.name).collect::<Vec<_>>()
+    );
     println!();
 
     // --- Phase 7: Persistence test ---
@@ -143,17 +172,28 @@ fn main() {
     let mut engine = GraphEngine::open(path).unwrap();
     assert_eq!(engine.node_count(), node_count);
     assert_eq!(engine.edge_count(), edge_count);
-    println!("  Reopened: {} nodes, {} edges -- OK", engine.node_count(), engine.edge_count());
+    println!(
+        "  Reopened: {} nodes, {} edges -- OK",
+        engine.node_count(),
+        engine.edge_count()
+    );
 
-    let result = engine.query("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name").unwrap();
-    println!("  Alice still knows {} people after reopen -- OK", result.rows.len());
+    let result = engine
+        .query("MATCH (a:Person {name: 'Alice'})-[:KNOWS]->(b) RETURN b.name")
+        .unwrap();
+    println!(
+        "  Alice still knows {} people after reopen -- OK",
+        result.rows.len()
+    );
     println!();
 
     // --- Phase 8: Transaction rollback ---
     println!("--- Phase 8: Transaction Rollback ---\n");
     let before = engine.node_count();
     engine.begin().unwrap();
-    engine.query("CREATE (x:Temp {name: 'ShouldNotExist'})").unwrap();
+    engine
+        .query("CREATE (x:Temp {name: 'ShouldNotExist'})")
+        .unwrap();
     println!("  After CREATE in tx: {} nodes", engine.node_count());
     engine.rollback().unwrap();
     println!("  After ROLLBACK: {} nodes (restored)", engine.node_count());

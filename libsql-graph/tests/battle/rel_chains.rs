@@ -1,5 +1,5 @@
-use libsql_graph::prelude::*;
 use libsql_graph::cursor::{bfs, RelChainCursor};
+use libsql_graph::prelude::*;
 use libsql_graph::storage::node_store::NodeStore;
 use libsql_graph::storage::rel_store::RelStore;
 
@@ -12,7 +12,10 @@ fn temp_path() -> String {
     p
 }
 
-fn build_chain_and_hub() -> (GraphEngine<libsql_graph::storage::pager_bridge::FilePager>, String) {
+fn build_chain_and_hub() -> (
+    GraphEngine<libsql_graph::storage::pager_bridge::FilePager>,
+    String,
+) {
     let path = temp_path();
     let mut engine = GraphEngine::create(&path, PAGE_SIZE).unwrap();
 
@@ -113,7 +116,12 @@ fn test_two_hop_cypher_query() {
     let result = engine
         .query("MATCH (a:Person {name: 'P0'})-[:FOLLOWS]->(b)-[:FOLLOWS]->(c) RETURN c.name")
         .unwrap();
-    assert_eq!(result.rows.len(), 1, "expected 1 row, got {}", result.rows.len());
+    assert_eq!(
+        result.rows.len(),
+        1,
+        "expected 1 row, got {}",
+        result.rows.len()
+    );
     assert_eq!(
         result.rows[0][0],
         libsql_graph::cypher::executor::Value::String("P2".into()),
@@ -145,11 +153,9 @@ fn test_follow_chain_five_hops() {
         let anchor = node_store.address(current);
         let mut cursor = RelChainCursor::new(node.first_rel, anchor, Direction::Outgoing)
             .with_type_filter(follows_token);
-        let neighbors = cursor.collect_neighbors(
-            engine.db().pager(),
-            &rel_store,
-            &node_store,
-        ).unwrap();
+        let neighbors = cursor
+            .collect_neighbors(engine.db().pager(), &rel_store, &node_store)
+            .unwrap();
 
         assert!(
             !neighbors.is_empty(),
@@ -159,7 +165,11 @@ fn test_follow_chain_five_hops() {
         );
         current = neighbors[0].neighbor_id;
     }
-    assert_eq!(current, 5, "following FOLLOWS 5 times from P0 should reach P5, got P{}", current);
+    assert_eq!(
+        current, 5,
+        "following FOLLOWS 5 times from P0 should reach P5, got P{}",
+        current
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
@@ -177,7 +187,9 @@ fn test_delete_relationship_breaks_chain() {
         .expect("node 50 should have outgoing edge to 51");
 
     let rel_store = RelStore::new(engine.db().header().rel_store_root, PAGE_SIZE as usize);
-    let rel_50_51 = rel_store.read_rel_at(engine.db().pager(), follows_rel_addr).unwrap();
+    let rel_50_51 = rel_store
+        .read_rel_at(engine.db().pager(), follows_rel_addr)
+        .unwrap();
     let follows_token = rel_50_51.type_token_id;
 
     let rpp = rel_store.records_per_page() as u64;
@@ -209,11 +221,9 @@ fn test_delete_relationship_breaks_chain() {
         let anchor = node_store.address(nid);
         let mut cursor = RelChainCursor::new(node.first_rel, anchor, Direction::Outgoing)
             .with_type_filter(follows_token);
-        let nbrs = cursor.collect_neighbors(
-            engine.db().pager(),
-            &rel_store2,
-            &node_store,
-        ).unwrap();
+        let nbrs = cursor
+            .collect_neighbors(engine.db().pager(), &rel_store2, &node_store)
+            .unwrap();
         for entry in nbrs {
             if !reachable_via_follows.contains(&entry.neighbor_id) {
                 frontier.push(entry.neighbor_id);
@@ -257,7 +267,11 @@ fn test_bfs_reaches_all_chain_nodes() {
 
     let ids: std::collections::HashSet<u64> = result.iter().map(|(id, _)| *id).collect();
     for i in 0u64..100 {
-        assert!(ids.contains(&i), "BFS from 0 outgoing should reach node {}", i);
+        assert!(
+            ids.contains(&i),
+            "BFS from 0 outgoing should reach node {}",
+            i
+        );
     }
 
     drop(engine);

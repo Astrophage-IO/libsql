@@ -66,7 +66,8 @@ impl Pager for MemPager {
         if self.tx_state != TxState::Write {
             return Err(GraphError::NoTransaction);
         }
-        self.pages.insert(handle.page_number(), handle.data().to_vec());
+        self.pages
+            .insert(handle.page_number(), handle.data().to_vec());
         Ok(())
     }
 

@@ -206,7 +206,7 @@ impl<P: Pager> GraphDatabase<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::header::{GraphHeader, GRAPH_MAGIC, FORMAT_VERSION};
+    use crate::storage::header::{GraphHeader, FORMAT_VERSION, GRAPH_MAGIC};
     use crate::storage::page::{PageHeader, PageType};
     use tempfile::NamedTempFile;
 

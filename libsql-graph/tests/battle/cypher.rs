@@ -75,7 +75,9 @@ fn build_social_network() -> (DefaultGraphEngine, String) {
 
     for i in 0u64..20 {
         let company_id = 20 + (i % 5);
-        engine.create_relationship(i, company_id, "WORKS_AT").unwrap();
+        engine
+            .create_relationship(i, company_id, "WORKS_AT")
+            .unwrap();
     }
 
     (engine, path)
@@ -161,15 +163,31 @@ fn t03_count_persons() {
 fn t04_avg_age() {
     let (mut engine, path) = build_social_network();
 
-    let result = engine
-        .query("MATCH (p:Person) RETURN avg(p.age)")
-        .unwrap();
+    let result = engine.query("MATCH (p:Person) RETURN avg(p.age)").unwrap();
 
     assert_eq!(result.rows.len(), 1);
     match &result.rows[0][0] {
         Value::Float(avg) => {
-            let expected_avg = (28 + 35 + 22 + 41 + 30 + 27 + 33 + 45 + 29 + 38 + 24 + 31 + 36
-                + 26 + 40 + 23 + 34 + 29 + 37 + 32) as f64
+            let expected_avg = (28
+                + 35
+                + 22
+                + 41
+                + 30
+                + 27
+                + 33
+                + 45
+                + 29
+                + 38
+                + 24
+                + 31
+                + 36
+                + 26
+                + 40
+                + 23
+                + 34
+                + 29
+                + 37
+                + 32) as f64
                 / 20.0;
             assert!(
                 (*avg - expected_avg).abs() < 0.01,
@@ -235,14 +253,16 @@ fn t07_relationship_traversal() {
     assert_eq!(result.columns, vec!["a.name", "b.name"]);
     assert_eq!(result.rows.len(), 15, "should have 15 KNOWS relationships");
 
-    let has_alice_bob = result.rows.iter().any(|r| {
-        r[0] == Value::String("Alice".into()) && r[1] == Value::String("Bob".into())
-    });
+    let has_alice_bob = result
+        .rows
+        .iter()
+        .any(|r| r[0] == Value::String("Alice".into()) && r[1] == Value::String("Bob".into()));
     assert!(has_alice_bob, "Alice->Bob KNOWS should exist");
 
-    let has_alice_charlie = result.rows.iter().any(|r| {
-        r[0] == Value::String("Alice".into()) && r[1] == Value::String("Charlie".into())
-    });
+    let has_alice_charlie = result
+        .rows
+        .iter()
+        .any(|r| r[0] == Value::String("Alice".into()) && r[1] == Value::String("Charlie".into()));
     assert!(has_alice_charlie, "Alice->Charlie KNOWS should exist");
 
     drop(engine);
@@ -302,13 +322,13 @@ fn t09_distinct() {
     );
 
     for i in 1..ages.len() {
-        assert!(
-            ages[i] >= ages[i - 1],
-            "ages should be in ascending order"
-        );
+        assert!(ages[i] >= ages[i - 1], "ages should be in ascending order");
     }
 
-    assert!(ages.len() < 20, "some ages are duplicated (29 appears twice), so distinct count < 20");
+    assert!(
+        ages.len() < 20,
+        "some ages are duplicated (29 appears twice), so distinct count < 20"
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
@@ -346,7 +366,10 @@ fn t11_invalid_query_returns_error() {
     assert!(result.is_err(), "invalid query should return Err");
 
     let result2 = engine.query("MATCH (p:Person) RETURN p.name");
-    assert!(result2.is_ok(), "engine should still work after invalid query");
+    assert!(
+        result2.is_ok(),
+        "engine should still work after invalid query"
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
@@ -360,7 +383,11 @@ fn t12_empty_result() {
         .query("MATCH (p:Person {name: 'NonExistent'}) RETURN p")
         .unwrap();
 
-    assert_eq!(result.rows.len(), 0, "non-existent person should return empty");
+    assert_eq!(
+        result.rows.len(),
+        0,
+        "non-existent person should return empty"
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
