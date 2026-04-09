@@ -11,6 +11,7 @@ use crate::storage::property_store::{
 };
 use crate::storage::record::RecordAddress;
 use crate::storage::rel_store::{RelRecord, RelStore};
+use crate::storage::dense::RelGroupStore;
 use crate::storage::string_overflow::StringOverflowStore;
 use crate::storage::token_store::{
     TokenRecord, TokenStore, TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE,
@@ -23,6 +24,7 @@ pub struct GraphEngine {
     token_store: TokenStore,
     property_store: PropertyStore,
     string_overflow: StringOverflowStore,
+    rel_group_store: RelGroupStore,
 }
 
 impl GraphEngine {
@@ -37,6 +39,7 @@ impl GraphEngine {
             token_store: TokenStore::new(h.token_store_root, ps),
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
+            rel_group_store: RelGroupStore::new(ps),
             db,
         })
     }
@@ -52,6 +55,7 @@ impl GraphEngine {
             token_store: TokenStore::new(h.token_store_root, ps),
             property_store: PropertyStore::new(h.prop_store_root, ps),
             string_overflow: StringOverflowStore::new(ps),
+            rel_group_store: RelGroupStore::new(ps),
             db,
         })
     }
@@ -200,6 +204,10 @@ impl GraphEngine {
             return Ok(vec![]);
         }
 
+        if node.is_dense() {
+            return self.get_neighbors_dense(node_id, &node, direction);
+        }
+
         let node_addr = self.node_store.address(node_id);
         let mut neighbors = Vec::new();
         let mut current = node.first_rel;
@@ -235,6 +243,57 @@ impl GraphEngine {
                 current = rel.src_next_rel;
             } else {
                 current = rel.dst_next_rel;
+            }
+        }
+
+        Ok(neighbors)
+    }
+
+    fn get_neighbors_dense(
+        &mut self,
+        node_id: u64,
+        node: &crate::storage::node_store::NodeRecord,
+        direction: Direction,
+    ) -> Result<Vec<(u64, RecordAddress)>, GraphError> {
+        let node_addr = self.node_store.address(node_id);
+        let groups = self.rel_group_store.iter_groups(self.db.pager(), node.first_rel)?;
+        let mut neighbors = Vec::new();
+
+        for (_, group) in &groups {
+            let chain_starts: Vec<RecordAddress> = match direction {
+                Direction::Outgoing => vec![group.out_first_rel, group.loop_first_rel],
+                Direction::Incoming => vec![group.in_first_rel, group.loop_first_rel],
+                Direction::Both => vec![group.out_first_rel, group.in_first_rel, group.loop_first_rel],
+            };
+            let chain_starts: Vec<RecordAddress> = chain_starts
+                .into_iter()
+                .filter(|a| !a.is_null())
+                .collect();
+
+            for start in chain_starts {
+                let mut current = start;
+                while !current.is_null() {
+                    let rel = self.rel_store.read_rel_at(self.db.pager(), current)?;
+                    if !rel.in_use() {
+                        break;
+                    }
+
+                    let is_source = rel.source_node == node_addr;
+
+                    if rel.type_token_id == group.type_token_id {
+                        if is_source {
+                            neighbors.push((self.addr_to_node_id(rel.target_node), current));
+                        } else {
+                            neighbors.push((self.addr_to_node_id(rel.source_node), current));
+                        }
+                    }
+
+                    current = if is_source {
+                        rel.src_next_rel
+                    } else {
+                        rel.dst_next_rel
+                    };
+                }
             }
         }
 
@@ -671,6 +730,106 @@ impl GraphEngine {
             }
         }
         Ok(keys)
+    }
+
+    pub fn convert_to_dense(&mut self, node_id: u64) -> Result<(), GraphError> {
+        self.db.pager().begin_write()?;
+
+        let mut node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if node.is_dense() || node.first_rel.is_null() {
+            self.db.pager().commit()?;
+            return Ok(());
+        }
+
+        let node_addr = self.node_store.address(node_id);
+        let mut type_chains: std::collections::HashMap<u32, (Vec<RecordAddress>, Vec<RecordAddress>, Vec<RecordAddress>)> =
+            std::collections::HashMap::new();
+
+        let mut current = node.first_rel;
+        while !current.is_null() {
+            let rel = self.rel_store.read_rel_at(self.db.pager(), current)?;
+            if !rel.in_use() {
+                break;
+            }
+
+            let is_source = rel.source_node == node_addr;
+            let is_target = rel.target_node == node_addr;
+            let is_loop = is_source && is_target;
+
+            let entry = type_chains.entry(rel.type_token_id).or_default();
+            if is_loop {
+                entry.2.push(current);
+            } else if is_source {
+                entry.0.push(current);
+            } else if is_target {
+                entry.1.push(current);
+            }
+
+            current = if is_source {
+                rel.src_next_rel
+            } else {
+                rel.dst_next_rel
+            };
+        }
+
+        let mut first_group_addr = RecordAddress::NULL;
+        let mut prev_group_addr = RecordAddress::NULL;
+
+        for (type_token, (out_rels, in_rels, loop_rels)) in &type_chains {
+            let mut group = crate::storage::dense::RelGroupRecord::new(*type_token);
+            group.out_count = out_rels.len() as u32;
+            group.in_count = in_rels.len() as u32;
+            group.loop_count = loop_rels.len() as u32;
+
+            if let Some(first) = out_rels.first() {
+                group.out_first_rel = *first;
+            }
+            if let Some(first) = in_rels.first() {
+                group.in_first_rel = *first;
+            }
+            if let Some(first) = loop_rels.first() {
+                group.loop_first_rel = *first;
+            }
+
+            let group_addr = self.rel_group_store.create_group(self.db.pager(), &group)?;
+
+            if first_group_addr.is_null() {
+                first_group_addr = group_addr;
+            }
+            if !prev_group_addr.is_null() {
+                let mut prev = self.rel_group_store.read_group(self.db.pager(), prev_group_addr)?;
+                prev.next_group = group_addr;
+                self.rel_group_store.write_group(self.db.pager(), prev_group_addr, &prev)?;
+            }
+            prev_group_addr = group_addr;
+        }
+
+        node.first_rel = first_group_addr;
+        node.set_dense(true);
+        self.node_store.write_node(self.db.pager(), node_id, &node)?;
+
+        self.flush_and_commit()
+    }
+
+    pub fn is_dense(&mut self, node_id: u64) -> Result<bool, GraphError> {
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        Ok(node.is_dense())
+    }
+
+    pub fn get_dense_groups(
+        &mut self,
+        node_id: u64,
+    ) -> Result<Vec<(u32, u32, u32, u32)>, GraphError> {
+        let node = self.node_store.read_node(self.db.pager(), node_id)?;
+        if !node.is_dense() {
+            return Ok(vec![]);
+        }
+
+        let groups = self.rel_group_store.iter_groups(self.db.pager(), node.first_rel)?;
+        Ok(groups
+            .into_iter()
+            .map(|(_, g)| (g.type_token_id, g.out_count, g.in_count, g.loop_count))
+            .collect())
     }
 
     fn unlink_rel_from_chain(
@@ -1151,6 +1310,132 @@ mod tests {
 
         let b_both = engine.get_neighbors(b, Direction::Both).unwrap();
         assert_eq!(b_both.len(), 2);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_convert_to_dense() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Hub").unwrap();
+        let mut targets = Vec::new();
+        for _ in 0..10 {
+            targets.push(engine.create_node("Spoke").unwrap());
+        }
+
+        for (i, &t) in targets.iter().enumerate() {
+            if i < 5 {
+                engine.create_relationship(hub, t, "KNOWS").unwrap();
+            } else {
+                engine.create_relationship(hub, t, "FOLLOWS").unwrap();
+            }
+        }
+
+        assert!(!engine.is_dense(hub).unwrap());
+
+        let pre_neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(pre_neighbors.len(), 10);
+
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        let post_neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(post_neighbors.len(), 10);
+
+        let groups = engine.get_dense_groups(hub).unwrap();
+        assert_eq!(groups.len(), 2);
+
+        let total_out: u32 = groups.iter().map(|g| g.1).sum();
+        assert_eq!(total_out, 10);
+        for g in &groups {
+            assert_eq!(g.1, 5);
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dense_node_query_via_cypher() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Person").unwrap();
+        engine
+            .set_node_property(hub, "name", PropertyValue::ShortString("Hub".into()))
+            .unwrap();
+
+        for i in 0..6 {
+            let spoke = engine.create_node("Person").unwrap();
+            engine
+                .set_node_property(
+                    spoke,
+                    "name",
+                    PropertyValue::ShortString(format!("S{i}")),
+                )
+                .unwrap();
+            engine.create_relationship(hub, spoke, "KNOWS").unwrap();
+        }
+
+        engine.convert_to_dense(hub).unwrap();
+
+        let result = engine
+            .query("MATCH (a:Person {name: 'Hub'})-[:KNOWS]->(b) RETURN b.name")
+            .unwrap();
+        assert_eq!(result.rows.len(), 6);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dense_node_integrity() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Node").unwrap();
+        for _ in 0..20 {
+            let target = engine.create_node("Node").unwrap();
+            engine.create_relationship(hub, target, "REL").unwrap();
+        }
+        engine.convert_to_dense(hub).unwrap();
+
+        let report = crate::integrity::check_integrity(&mut engine).unwrap();
+        let non_count_errors: Vec<_> = report
+            .errors
+            .iter()
+            .filter(|e| !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. }))
+            .collect();
+        assert!(
+            non_count_errors.is_empty(),
+            "non-count errors: {:?}",
+            non_count_errors
+        );
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_dense_already_dense_noop() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Node").unwrap();
+        let target = engine.create_node("Node").unwrap();
+        engine.create_relationship(hub, target, "REL").unwrap();
+
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        let neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 1);
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

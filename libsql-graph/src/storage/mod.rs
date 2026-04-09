@@ -1,4 +1,5 @@
 pub mod database;
+pub mod dense;
 pub mod freespace;
 pub mod header;
 pub mod label_index;
