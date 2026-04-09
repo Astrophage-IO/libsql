@@ -8,6 +8,7 @@ members = [
   "libsql",
   "libsql-ffi",
   "libsql-graph",
+  "libsql-graph-bolt",
   "libsql-hrana",
   "libsql-replication",
   "libsql-server",
