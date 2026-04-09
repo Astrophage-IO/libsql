@@ -14,6 +14,7 @@ pub enum Value {
     Float(f64),
     String(String),
     Node(u64),
+    List(Vec<Value>),
 }
 
 impl std::fmt::Display for Value {
@@ -25,6 +26,14 @@ impl std::fmt::Display for Value {
             Self::Float(n) => write!(f, "{n}"),
             Self::String(s) => write!(f, "{s}"),
             Self::Node(id) => write!(f, "Node({id})"),
+            Self::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    write!(f, "{item}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }
@@ -55,7 +64,7 @@ impl Value {
             }
             Self::Float(f) => PropertyValue::Float64(*f),
             Self::String(s) => PropertyValue::ShortString(s.clone()),
-            Self::Node(_) => PropertyValue::Null,
+            Self::Node(_) | Self::List(_) => PropertyValue::Null,
         }
     }
 
@@ -77,6 +86,7 @@ impl Value {
             Self::Float(f) => *f != 0.0,
             Self::String(s) => !s.is_empty(),
             Self::Node(_) => true,
+            Self::List(items) => !items.is_empty(),
         }
     }
 }
@@ -107,6 +117,8 @@ pub fn execute(
     let mut stats = QueryStats::default();
     let mut columns = Vec::new();
     let mut project_items: Option<&Vec<ReturnItem>> = None;
+    #[allow(unused_assignments)]
+    let mut expanded_star: Option<Vec<ReturnItem>> = None;
     let mut order_items: Option<&Vec<OrderItem>> = None;
     let mut limit: Option<u64> = None;
 
@@ -181,7 +193,25 @@ pub fn execute(
                 exec_delete(engine, &binding_table, variable, *detach, &mut stats)?;
             }
             PlanStep::Project { items } => {
-                project_items = Some(items);
+                if items.len() == 1 && items[0].expr == Expr::Variable("*".to_string()) {
+                    let mut all_vars: Vec<String> = binding_table
+                        .iter()
+                        .flat_map(|b| b.keys().cloned())
+                        .collect();
+                    all_vars.sort();
+                    all_vars.dedup();
+                    let expanded: Vec<ReturnItem> = all_vars
+                        .into_iter()
+                        .map(|name| ReturnItem {
+                            expr: Expr::Variable(name),
+                            alias: None,
+                        })
+                        .collect();
+                    expanded_star = Some(expanded);
+                    project_items = expanded_star.as_ref();
+                } else {
+                    project_items = Some(items);
+                }
             }
             PlanStep::OrderBy { items } => {
                 order_items = Some(items);
@@ -201,12 +231,18 @@ pub fn execute(
             })
             .collect();
 
-        for bindings in &binding_table {
-            let row: Vec<Value> = items
-                .iter()
-                .map(|item| eval_expr(engine, &item.expr, bindings, params))
-                .collect();
-            rows.push(row);
+        let has_aggregates = items.iter().any(|item| is_aggregate_expr(&item.expr));
+
+        if has_aggregates {
+            rows = exec_aggregate(engine, &binding_table, items, params);
+        } else {
+            for bindings in &binding_table {
+                let row: Vec<Value> = items
+                    .iter()
+                    .map(|item| eval_expr(engine, &item.expr, bindings, params))
+                    .collect();
+                rows.push(row);
+            }
         }
     }
 
@@ -595,10 +631,68 @@ fn eval_expr(
         }
         Expr::FunctionCall(name, args) => {
             match name.to_lowercase().as_str() {
-                "count" => Value::Integer(bindings.keys().len() as i64),
-                "tostring" => {
+                "tostring" | "tostr" => {
                     let val = eval_expr(engine, &args[0], bindings, params);
                     Value::String(val.to_string())
+                }
+                "tointeger" | "toint" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::Integer(_) => val,
+                        Value::Float(f) => Value::Integer(f as i64),
+                        Value::String(s) => s.parse::<i64>().map(Value::Integer).unwrap_or(Value::Null),
+                        Value::Bool(b) => Value::Integer(b as i64),
+                        _ => Value::Null,
+                    }
+                }
+                "tofloat" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::Float(_) => val,
+                        Value::Integer(n) => Value::Float(n as f64),
+                        Value::String(s) => s.parse::<f64>().map(Value::Float).unwrap_or(Value::Null),
+                        _ => Value::Null,
+                    }
+                }
+                "type" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    let type_name = match val {
+                        Value::Null => "NULL",
+                        Value::Bool(_) => "BOOLEAN",
+                        Value::Integer(_) => "INTEGER",
+                        Value::Float(_) => "FLOAT",
+                        Value::String(_) => "STRING",
+                        Value::Node(_) => "NODE",
+                        Value::List(_) => "LIST",
+                    };
+                    Value::String(type_name.to_string())
+                }
+                "id" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::Node(id) => Value::Integer(id as i64),
+                        _ => Value::Null,
+                    }
+                }
+                "labels" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    if let Value::Node(id) = val {
+                        let label_name = engine.get_node(id).ok().map(|n| {
+                            engine.get_label_name(n.label_token_id).unwrap_or_default()
+                        }).unwrap_or_default();
+                        Value::List(vec![Value::String(label_name)])
+                    } else {
+                        Value::Null
+                    }
+                }
+                // Aggregates return placeholder when evaluated per-row;
+                // real aggregation happens in exec_aggregate
+                "count" | "sum" | "avg" | "min" | "max" | "collect" => {
+                    if args.is_empty() {
+                        Value::Integer(1) // count(*)
+                    } else {
+                        eval_expr(engine, &args[0], bindings, params)
+                    }
                 }
                 _ => Value::Null,
             }
@@ -665,9 +759,14 @@ fn eval_binop(left: &Value, op: BinOp, right: &Value) -> Value {
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
+        (Value::Integer(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Float(x), Value::Integer(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
         (Value::String(x), Value::String(y)) => x.cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Null, Value::Null) => std::cmp::Ordering::Equal,
+        (Value::Null, _) => std::cmp::Ordering::Less,
+        (_, Value::Null) => std::cmp::Ordering::Greater,
         _ => std::cmp::Ordering::Equal,
     }
 }
@@ -676,8 +775,163 @@ fn expr_name(expr: &Expr) -> String {
     match expr {
         Expr::Variable(name) => name.clone(),
         Expr::Property(var, prop) => format!("{var}.{prop}"),
-        Expr::FunctionCall(name, _) => name.clone(),
+        Expr::FunctionCall(name, args) => {
+            let inner = args.first().map(|a| expr_name(a)).unwrap_or("*".into());
+            format!("{name}({inner})")
+        }
         _ => "expr".to_string(),
+    }
+}
+
+fn is_aggregate_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::FunctionCall(name, _) => matches!(
+            name.to_lowercase().as_str(),
+            "count" | "sum" | "avg" | "min" | "max" | "collect"
+        ),
+        _ => false,
+    }
+}
+
+fn exec_aggregate(
+    engine: &mut GraphEngine,
+    binding_table: &[Bindings],
+    items: &[ReturnItem],
+    params: &HashMap<String, Value>,
+) -> Vec<Vec<Value>> {
+    let group_indices: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !is_aggregate_expr(&item.expr))
+        .map(|(i, _)| i)
+        .collect();
+
+    let agg_indices: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| is_aggregate_expr(&item.expr))
+        .map(|(i, _)| i)
+        .collect();
+
+    if group_indices.is_empty() {
+        let mut row = vec![Value::Null; items.len()];
+        for &ai in &agg_indices {
+            row[ai] = compute_aggregate(engine, binding_table, &items[ai].expr, params);
+        }
+        return vec![row];
+    }
+
+    let mut groups: Vec<(Vec<Value>, Vec<Vec<Value>>)> = Vec::new();
+
+    for bindings in binding_table {
+        let group_key: Vec<Value> = group_indices
+            .iter()
+            .map(|&i| eval_expr(engine, &items[i].expr, bindings, params))
+            .collect();
+
+        let all_vals: Vec<Value> = items
+            .iter()
+            .map(|item| eval_expr(engine, &item.expr, bindings, params))
+            .collect();
+
+        if let Some(group) = groups.iter_mut().find(|(key, _)| key == &group_key) {
+            group.1.push(all_vals);
+        } else {
+            groups.push((group_key, vec![all_vals]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(_, group_rows)| {
+            let mut result_row = vec![Value::Null; items.len()];
+
+            for &gi in &group_indices {
+                result_row[gi] = group_rows[0][gi].clone();
+            }
+
+            for &ai in &agg_indices {
+                let vals: Vec<Value> = group_rows.iter().map(|row| row[ai].clone()).collect();
+                result_row[ai] = aggregate_values(&items[ai].expr, &vals);
+            }
+
+            result_row
+        })
+        .collect()
+}
+
+fn compute_aggregate(
+    engine: &mut GraphEngine,
+    binding_table: &[Bindings],
+    expr: &Expr,
+    params: &HashMap<String, Value>,
+) -> Value {
+    if let Expr::FunctionCall(_name, args) = expr {
+        let vals: Vec<Value> = binding_table
+            .iter()
+            .map(|b| {
+                if args.is_empty() {
+                    Value::Integer(1)
+                } else {
+                    eval_expr(engine, &args[0], b, params)
+                }
+            })
+            .collect();
+        aggregate_values(expr, &vals)
+    } else {
+        Value::Null
+    }
+}
+
+fn aggregate_values(expr: &Expr, vals: &[Value]) -> Value {
+    let func_name = match expr {
+        Expr::FunctionCall(name, _) => name.to_lowercase(),
+        _ => return Value::Null,
+    };
+
+    match func_name.as_str() {
+        "count" => Value::Integer(vals.iter().filter(|v| **v != Value::Null).count() as i64),
+        "sum" => {
+            let mut total = 0i64;
+            let mut is_float = false;
+            let mut ftotal = 0.0f64;
+            for v in vals {
+                match v {
+                    Value::Integer(n) => { total += n; ftotal += *n as f64; }
+                    Value::Float(f) => { is_float = true; ftotal += f; }
+                    _ => {}
+                }
+            }
+            if is_float { Value::Float(ftotal) } else { Value::Integer(total) }
+        }
+        "avg" => {
+            let mut sum = 0.0f64;
+            let mut count = 0u64;
+            for v in vals {
+                match v {
+                    Value::Integer(n) => { sum += *n as f64; count += 1; }
+                    Value::Float(f) => { sum += f; count += 1; }
+                    _ => {}
+                }
+            }
+            if count == 0 { Value::Null } else { Value::Float(sum / count as f64) }
+        }
+        "min" => {
+            vals.iter()
+                .filter(|v| **v != Value::Null)
+                .min_by(|a, b| compare_values(a, b))
+                .cloned()
+                .unwrap_or(Value::Null)
+        }
+        "max" => {
+            vals.iter()
+                .filter(|v| **v != Value::Null)
+                .max_by(|a, b| compare_values(a, b))
+                .cloned()
+                .unwrap_or(Value::Null)
+        }
+        "collect" => Value::List(vals.to_vec()),
+        _ => Value::Null,
     }
 }
 
@@ -889,6 +1143,169 @@ mod tests {
             "MATCH (a:Person) WHERE a.name = 'Nobody' RETURN a",
         );
         assert_eq!(result.rows.len(), 0);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_count_aggregate() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person)-[:KNOWS]->(b) RETURN a.name, count(b) AS friends",
+        );
+        assert_eq!(result.columns, vec!["a.name", "friends"]);
+        assert_eq!(result.rows.len(), 1); // Alice is the only one with KNOWS outgoing
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+        assert_eq!(result.rows[0][1], Value::Integer(2));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_sum_aggregate() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN sum(a.age)",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Integer(90)); // 30 + 25 + 35
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_avg_aggregate() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN avg(a.age)",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Float(30.0)); // (30+25+35)/3
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_min_max_aggregate() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN min(a.age), max(a.age)",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Integer(25));
+        assert_eq!(result.rows[0][1], Value::Integer(35));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_collect_aggregate() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN collect(a.name)",
+        );
+        assert_eq!(result.rows.len(), 1);
+        if let Value::List(items) = &result.rows[0][0] {
+            assert_eq!(items.len(), 3);
+            assert!(items.contains(&Value::String("Alice".into())));
+            assert!(items.contains(&Value::String("Bob".into())));
+            assert!(items.contains(&Value::String("Charlie".into())));
+        } else {
+            panic!("expected list");
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_convenience_method() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = engine.query("MATCH (a:Person) RETURN a.name LIMIT 2").unwrap();
+        assert_eq!(result.rows.len(), 2);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_query_with_params() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let mut params = HashMap::new();
+        params.insert("name".to_string(), Value::String("Bob".into()));
+        let result = engine
+            .query_with_params("MATCH (a:Person) WHERE a.name = $name RETURN a.age", params)
+            .unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Integer(25));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_return_star() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN *",
+        );
+        assert!(result.columns.contains(&"a".to_string()));
+        assert!(result.columns.contains(&"b".to_string()));
+        assert_eq!(result.rows.len(), 2);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_id_function() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN id(a)",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::Integer(0));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_labels_function() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN labels(a)",
+        );
+        assert_eq!(result.rows.len(), 1);
+        if let Value::List(labels) = &result.rows[0][0] {
+            assert_eq!(labels.len(), 1);
+            assert_eq!(labels[0], Value::String("Person".into()));
+        } else {
+            panic!("expected list");
+        }
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+
+use crate::cypher::executor::{self, QueryResult, Value};
+use crate::cypher::{parser, planner};
 use crate::error::GraphError;
 use crate::storage::database::GraphDatabase;
 use crate::storage::node_store::{NodeRecord, NodeStore};
@@ -238,6 +242,26 @@ impl GraphEngine {
 
     pub fn edge_count(&self) -> u64 {
         self.db.header().edge_count
+    }
+
+    pub fn query(&mut self, cypher: &str) -> Result<QueryResult, GraphError> {
+        let stmt = parser::parse(cypher)
+            .map_err(|e| GraphError::PagerError(format!("parse error: {e}")))?;
+        let plan = planner::plan(&stmt)
+            .map_err(|e| GraphError::PagerError(format!("plan error: {e}")))?;
+        executor::execute(self, &plan, &HashMap::new())
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        cypher: &str,
+        params: HashMap<String, Value>,
+    ) -> Result<QueryResult, GraphError> {
+        let stmt = parser::parse(cypher)
+            .map_err(|e| GraphError::PagerError(format!("parse error: {e}")))?;
+        let plan = planner::plan(&stmt)
+            .map_err(|e| GraphError::PagerError(format!("plan error: {e}")))?;
+        executor::execute(self, &plan, &params)
     }
 
     pub fn get_or_create_prop_key(&mut self, name: &str) -> Result<u16, GraphError> {

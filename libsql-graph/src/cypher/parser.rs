@@ -194,10 +194,18 @@ impl Parser {
         self.expect(&Token::Return)?;
 
         let mut items = Vec::new();
-        items.push(self.parse_return_item()?);
-        while *self.peek() == Token::Comma {
+        if *self.peek() == Token::Star {
             self.advance();
+            items.push(ReturnItem {
+                expr: Expr::Variable("*".to_string()),
+                alias: None,
+            });
+        } else {
             items.push(self.parse_return_item()?);
+            while *self.peek() == Token::Comma {
+                self.advance();
+                items.push(self.parse_return_item()?);
+            }
         }
 
         let order_by = if *self.peek() == Token::Order {
