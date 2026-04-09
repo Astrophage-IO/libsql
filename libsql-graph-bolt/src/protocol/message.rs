@@ -1,26 +1,47 @@
-use std::collections::HashMap;
 use crate::error::BoltError;
 use crate::packstream::PackValue;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoltRequest {
-    Hello { extra: HashMap<String, PackValue> },
+    Hello {
+        extra: HashMap<String, PackValue>,
+    },
     Goodbye,
     Reset,
-    Run { query: String, params: HashMap<String, PackValue>, extra: HashMap<String, PackValue> },
-    Begin { extra: HashMap<String, PackValue> },
+    Run {
+        query: String,
+        params: HashMap<String, PackValue>,
+        extra: HashMap<String, PackValue>,
+    },
+    Begin {
+        extra: HashMap<String, PackValue>,
+    },
     Commit,
     Rollback,
-    Discard { n: i64, qid: i64 },
-    Pull { n: i64, qid: i64 },
+    Discard {
+        n: i64,
+        qid: i64,
+    },
+    Pull {
+        n: i64,
+        qid: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoltResponse {
-    Success { metadata: HashMap<String, PackValue> },
-    Record { data: Vec<PackValue> },
+    Success {
+        metadata: HashMap<String, PackValue>,
+    },
+    Record {
+        data: Vec<PackValue>,
+    },
     Ignored,
-    Failure { code: String, message: String },
+    Failure {
+        code: String,
+        message: String,
+    },
 }
 
 fn pack_map_to_hashmap(value: PackValue) -> Result<HashMap<String, PackValue>, BoltError> {
@@ -51,62 +72,69 @@ fn extract_n_qid(extra: &HashMap<String, PackValue>) -> (i64, i64) {
 impl BoltRequest {
     pub fn parse(value: PackValue) -> Result<BoltRequest, BoltError> {
         match value {
-            PackValue::Struct { tag, fields } => {
-                match tag {
-                    0x01 => {
-                        let extra = match fields.into_iter().next() {
-                            Some(v) => pack_map_to_hashmap(v)?,
-                            None => HashMap::new(),
-                        };
-                        Ok(BoltRequest::Hello { extra })
-                    }
-                    0x02 => Ok(BoltRequest::Goodbye),
-                    0x0F => Ok(BoltRequest::Reset),
-                    0x10 => {
-                        let mut iter = fields.into_iter();
-                        let query = match iter.next() {
-                            Some(PackValue::String(s)) => s,
-                            _ => return Err(BoltError::Protocol("RUN: expected query string".into())),
-                        };
-                        let params = match iter.next() {
-                            Some(v) => pack_map_to_hashmap(v)?,
-                            None => HashMap::new(),
-                        };
-                        let extra = match iter.next() {
-                            Some(v) => pack_map_to_hashmap(v)?,
-                            None => HashMap::new(),
-                        };
-                        Ok(BoltRequest::Run { query, params, extra })
-                    }
-                    0x11 => {
-                        let extra = match fields.into_iter().next() {
-                            Some(v) => pack_map_to_hashmap(v)?,
-                            None => HashMap::new(),
-                        };
-                        Ok(BoltRequest::Begin { extra })
-                    }
-                    0x12 => Ok(BoltRequest::Commit),
-                    0x13 => Ok(BoltRequest::Rollback),
-                    0x2F => {
-                        let extra_map = match fields.into_iter().next() {
-                            Some(v) => pack_map_to_hashmap(v)?,
-                            None => HashMap::new(),
-                        };
-                        let (n, qid) = extract_n_qid(&extra_map);
-                        Ok(BoltRequest::Discard { n, qid })
-                    }
-                    0x3F => {
-                        let extra_map = match fields.into_iter().next() {
-                            Some(v) => pack_map_to_hashmap(v)?,
-                            None => HashMap::new(),
-                        };
-                        let (n, qid) = extract_n_qid(&extra_map);
-                        Ok(BoltRequest::Pull { n, qid })
-                    }
-                    _ => Err(BoltError::Protocol(format!("unknown message tag: 0x{:02X}", tag))),
+            PackValue::Struct { tag, fields } => match tag {
+                0x01 => {
+                    let extra = match fields.into_iter().next() {
+                        Some(v) => pack_map_to_hashmap(v)?,
+                        None => HashMap::new(),
+                    };
+                    Ok(BoltRequest::Hello { extra })
                 }
-            }
-            _ => Err(BoltError::Protocol("expected Struct for Bolt message".into())),
+                0x02 => Ok(BoltRequest::Goodbye),
+                0x0F => Ok(BoltRequest::Reset),
+                0x10 => {
+                    let mut iter = fields.into_iter();
+                    let query = match iter.next() {
+                        Some(PackValue::String(s)) => s,
+                        _ => return Err(BoltError::Protocol("RUN: expected query string".into())),
+                    };
+                    let params = match iter.next() {
+                        Some(v) => pack_map_to_hashmap(v)?,
+                        None => HashMap::new(),
+                    };
+                    let extra = match iter.next() {
+                        Some(v) => pack_map_to_hashmap(v)?,
+                        None => HashMap::new(),
+                    };
+                    Ok(BoltRequest::Run {
+                        query,
+                        params,
+                        extra,
+                    })
+                }
+                0x11 => {
+                    let extra = match fields.into_iter().next() {
+                        Some(v) => pack_map_to_hashmap(v)?,
+                        None => HashMap::new(),
+                    };
+                    Ok(BoltRequest::Begin { extra })
+                }
+                0x12 => Ok(BoltRequest::Commit),
+                0x13 => Ok(BoltRequest::Rollback),
+                0x2F => {
+                    let extra_map = match fields.into_iter().next() {
+                        Some(v) => pack_map_to_hashmap(v)?,
+                        None => HashMap::new(),
+                    };
+                    let (n, qid) = extract_n_qid(&extra_map);
+                    Ok(BoltRequest::Discard { n, qid })
+                }
+                0x3F => {
+                    let extra_map = match fields.into_iter().next() {
+                        Some(v) => pack_map_to_hashmap(v)?,
+                        None => HashMap::new(),
+                    };
+                    let (n, qid) = extract_n_qid(&extra_map);
+                    Ok(BoltRequest::Pull { n, qid })
+                }
+                _ => Err(BoltError::Protocol(format!(
+                    "unknown message tag: 0x{:02X}",
+                    tag
+                ))),
+            },
+            _ => Err(BoltError::Protocol(
+                "expected Struct for Bolt message".into(),
+            )),
         }
     }
 }
@@ -156,13 +184,20 @@ mod tests {
 
     #[test]
     fn parse_hello() {
-        let val = make_struct(0x01, vec![
-            make_map(vec![("user_agent", PackValue::String("test/1.0".into()))]),
-        ]);
+        let val = make_struct(
+            0x01,
+            vec![make_map(vec![(
+                "user_agent",
+                PackValue::String("test/1.0".into()),
+            )])],
+        );
         let req = BoltRequest::parse(val).unwrap();
         match req {
             BoltRequest::Hello { extra } => {
-                assert_eq!(extra.get("user_agent"), Some(&PackValue::String("test/1.0".into())));
+                assert_eq!(
+                    extra.get("user_agent"),
+                    Some(&PackValue::String("test/1.0".into()))
+                );
             }
             _ => panic!("expected Hello"),
         }
@@ -192,14 +227,21 @@ mod tests {
 
     #[test]
     fn parse_run() {
-        let val = make_struct(0x10, vec![
-            PackValue::String("MATCH (n) RETURN n".into()),
-            make_map(vec![("x", PackValue::Int(42))]),
-            make_map(vec![]),
-        ]);
+        let val = make_struct(
+            0x10,
+            vec![
+                PackValue::String("MATCH (n) RETURN n".into()),
+                make_map(vec![("x", PackValue::Int(42))]),
+                make_map(vec![]),
+            ],
+        );
         let req = BoltRequest::parse(val).unwrap();
         match req {
-            BoltRequest::Run { query, params, extra } => {
+            BoltRequest::Run {
+                query,
+                params,
+                extra,
+            } => {
                 assert_eq!(query, "MATCH (n) RETURN n");
                 assert_eq!(params.get("x"), Some(&PackValue::Int(42)));
                 assert!(extra.is_empty());
@@ -216,12 +258,14 @@ mod tests {
 
     #[test]
     fn parse_run_minimal_fields() {
-        let val = make_struct(0x10, vec![
-            PackValue::String("RETURN 1".into()),
-        ]);
+        let val = make_struct(0x10, vec![PackValue::String("RETURN 1".into())]);
         let req = BoltRequest::parse(val).unwrap();
         match req {
-            BoltRequest::Run { query, params, extra } => {
+            BoltRequest::Run {
+                query,
+                params,
+                extra,
+            } => {
                 assert_eq!(query, "RETURN 1");
                 assert!(params.is_empty());
                 assert!(extra.is_empty());
@@ -232,7 +276,10 @@ mod tests {
 
     #[test]
     fn parse_begin() {
-        let val = make_struct(0x11, vec![make_map(vec![("db", PackValue::String("neo4j".into()))])]);
+        let val = make_struct(
+            0x11,
+            vec![make_map(vec![("db", PackValue::String("neo4j".into()))])],
+        );
         let req = BoltRequest::parse(val).unwrap();
         match req {
             BoltRequest::Begin { extra } => {
@@ -256,9 +303,13 @@ mod tests {
 
     #[test]
     fn parse_discard() {
-        let val = make_struct(0x2F, vec![
-            make_map(vec![("n", PackValue::Int(100)), ("qid", PackValue::Int(0))]),
-        ]);
+        let val = make_struct(
+            0x2F,
+            vec![make_map(vec![
+                ("n", PackValue::Int(100)),
+                ("qid", PackValue::Int(0)),
+            ])],
+        );
         let req = BoltRequest::parse(val).unwrap();
         assert_eq!(req, BoltRequest::Discard { n: 100, qid: 0 });
     }
@@ -272,9 +323,13 @@ mod tests {
 
     #[test]
     fn parse_pull() {
-        let val = make_struct(0x3F, vec![
-            make_map(vec![("n", PackValue::Int(-1)), ("qid", PackValue::Int(3))]),
-        ]);
+        let val = make_struct(
+            0x3F,
+            vec![make_map(vec![
+                ("n", PackValue::Int(-1)),
+                ("qid", PackValue::Int(3)),
+            ])],
+        );
         let req = BoltRequest::parse(val).unwrap();
         assert_eq!(req, BoltRequest::Pull { n: -1, qid: 3 });
     }
@@ -309,7 +364,8 @@ mod tests {
                 assert_eq!(fields.len(), 1);
                 match &fields[0] {
                     PackValue::Map(pairs) => {
-                        let map: HashMap<&str, &PackValue> = pairs.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                        let map: HashMap<&str, &PackValue> =
+                            pairs.iter().map(|(k, v)| (k.as_str(), v)).collect();
                         assert_eq!(map.get("server"), Some(&&PackValue::String("test".into())));
                     }
                     _ => panic!("expected Map"),
@@ -321,7 +377,9 @@ mod tests {
 
     #[test]
     fn serialize_record() {
-        let resp = BoltResponse::Record { data: vec![PackValue::Int(1), PackValue::String("hello".into())] };
+        let resp = BoltResponse::Record {
+            data: vec![PackValue::Int(1), PackValue::String("hello".into())],
+        };
         let val = resp.to_pack_value();
         match val {
             PackValue::Struct { tag, fields } => {
@@ -366,9 +424,18 @@ mod tests {
                 assert_eq!(fields.len(), 1);
                 match &fields[0] {
                     PackValue::Map(pairs) => {
-                        let map: HashMap<&str, &PackValue> = pairs.iter().map(|(k, v)| (k.as_str(), v)).collect();
-                        assert_eq!(map.get("code"), Some(&&PackValue::String("Neo.ClientError.Statement.SyntaxError".into())));
-                        assert_eq!(map.get("message"), Some(&&PackValue::String("bad query".into())));
+                        let map: HashMap<&str, &PackValue> =
+                            pairs.iter().map(|(k, v)| (k.as_str(), v)).collect();
+                        assert_eq!(
+                            map.get("code"),
+                            Some(&&PackValue::String(
+                                "Neo.ClientError.Statement.SyntaxError".into()
+                            ))
+                        );
+                        assert_eq!(
+                            map.get("message"),
+                            Some(&&PackValue::String("bad query".into()))
+                        );
                     }
                     _ => panic!("expected Map"),
                 }
@@ -380,8 +447,13 @@ mod tests {
     #[test]
     fn roundtrip_success_metadata() {
         let mut metadata = HashMap::new();
-        metadata.insert("fields".into(), PackValue::List(vec![PackValue::String("a".into())]));
-        let resp = BoltResponse::Success { metadata: metadata.clone() };
+        metadata.insert(
+            "fields".into(),
+            PackValue::List(vec![PackValue::String("a".into())]),
+        );
+        let resp = BoltResponse::Success {
+            metadata: metadata.clone(),
+        };
         let val = resp.to_pack_value();
         match val {
             PackValue::Struct { tag, fields } => {
@@ -405,7 +477,10 @@ mod tests {
                 assert_eq!(tag, 0x7F);
                 let map = pack_map_to_hashmap(fields.into_iter().next().unwrap()).unwrap();
                 assert_eq!(map.get("code"), Some(&PackValue::String("err.code".into())));
-                assert_eq!(map.get("message"), Some(&PackValue::String("err msg".into())));
+                assert_eq!(
+                    map.get("message"),
+                    Some(&PackValue::String("err msg".into()))
+                );
             }
             _ => panic!("expected Struct"),
         }

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::BoltError;
 
@@ -9,7 +9,10 @@ const MAX_CHUNK_SIZE: usize = 65535;
 const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn read_exact_with_timeout<R: AsyncRead + Unpin>(reader: &mut R, buf: &mut [u8]) -> Result<(), BoltError> {
+async fn read_exact_with_timeout<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut [u8],
+) -> Result<(), BoltError> {
     match tokio::time::timeout(READ_TIMEOUT, reader.read_exact(buf)).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -38,7 +41,10 @@ pub async fn read_message<R: AsyncRead + Unpin>(reader: &mut R) -> Result<Bytes,
     }
 }
 
-pub async fn write_message<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -> Result<(), BoltError> {
+pub async fn write_message<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    data: &[u8],
+) -> Result<(), BoltError> {
     for chunk in data.chunks(MAX_CHUNK_SIZE) {
         let len = chunk.len() as u16;
         writer.write_all(&len.to_be_bytes()).await?;

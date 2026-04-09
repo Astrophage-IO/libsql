@@ -9,9 +9,9 @@ use libsql_graph::graph::DefaultGraphEngine;
 
 use crate::error::BoltError;
 use crate::packstream::{self, PackValue};
-use crate::protocol::state::{BoltState, RequestKind, TransitionResult};
+use crate::protocol::handshake::{handshake_failure, handshake_response, parse_handshake};
 use crate::protocol::message::{BoltRequest, BoltResponse};
-use crate::protocol::handshake::{parse_handshake, handshake_response, handshake_failure};
+use crate::protocol::state::{BoltState, RequestKind, TransitionResult};
 use crate::transport;
 use crate::types;
 
@@ -69,8 +69,14 @@ impl Session {
 
     fn handle_hello(&self) -> BoltResponse {
         let mut metadata = HashMap::new();
-        metadata.insert("server".into(), PackValue::String("LibSQL-Graph/0.1.0".into()));
-        metadata.insert("connection_id".into(), PackValue::String(self.connection_id.clone()));
+        metadata.insert(
+            "server".into(),
+            PackValue::String("LibSQL-Graph/0.1.0".into()),
+        );
+        metadata.insert(
+            "connection_id".into(),
+            PackValue::String(self.connection_id.clone()),
+        );
         BoltResponse::Success { metadata }
     }
 
@@ -83,7 +89,11 @@ impl Session {
         };
         match result {
             Ok(qr) => {
-                let fields: Vec<PackValue> = qr.columns.iter().map(|c| PackValue::String(c.clone())).collect();
+                let fields: Vec<PackValue> = qr
+                    .columns
+                    .iter()
+                    .map(|c| PackValue::String(c.clone()))
+                    .collect();
                 self.pending_result = Some(qr);
                 self.pending_cursor = 0;
                 let mut metadata = HashMap::new();
@@ -126,9 +136,16 @@ impl Session {
                 responses.push(BoltResponse::Success { metadata });
             } else {
                 let stats = &result.stats;
-                let query_type = if stats.nodes_created > 0 || stats.relationships_created > 0
-                    || stats.properties_set > 0 || stats.nodes_deleted > 0 {
-                    if result.columns.is_empty() { "w" } else { "rw" }
+                let query_type = if stats.nodes_created > 0
+                    || stats.relationships_created > 0
+                    || stats.properties_set > 0
+                    || stats.nodes_deleted > 0
+                {
+                    if result.columns.is_empty() {
+                        "w"
+                    } else {
+                        "rw"
+                    }
                 } else {
                     "r"
                 };
@@ -181,7 +198,12 @@ impl Session {
             metadata.insert("has_more".into(), PackValue::Bool(true));
             (BoltResponse::Success { metadata }, true)
         } else {
-            (BoltResponse::Success { metadata: HashMap::new() }, false)
+            (
+                BoltResponse::Success {
+                    metadata: HashMap::new(),
+                },
+                false,
+            )
         }
     }
 
@@ -189,7 +211,9 @@ impl Session {
         match self.engine.begin() {
             Ok(()) => {
                 self.in_transaction = true;
-                BoltResponse::Success { metadata: HashMap::new() }
+                BoltResponse::Success {
+                    metadata: HashMap::new(),
+                }
             }
             Err(e) => {
                 let (code, message) = types::graph_error_to_bolt(&e);
@@ -221,7 +245,9 @@ impl Session {
         match self.engine.rollback() {
             Ok(()) => {
                 self.in_transaction = false;
-                BoltResponse::Success { metadata: HashMap::new() }
+                BoltResponse::Success {
+                    metadata: HashMap::new(),
+                }
             }
             Err(e) => {
                 let (code, message) = types::graph_error_to_bolt(&e);
@@ -237,7 +263,9 @@ impl Session {
         }
         self.pending_result = None;
         self.pending_cursor = 0;
-        BoltResponse::Success { metadata: HashMap::new() }
+        BoltResponse::Success {
+            metadata: HashMap::new(),
+        }
     }
 }
 
@@ -320,7 +348,11 @@ pub async fn handle_connection(
                     _ => BoltState::Defunct,
                 };
             }
-            BoltRequest::Run { ref query, ref params, .. } => {
+            BoltRequest::Run {
+                ref query,
+                ref params,
+                ..
+            } => {
                 let resp = session.handle_run(query, params);
                 let success = matches!(resp, BoltResponse::Success { .. });
                 send_response(&mut stream, &resp).await?;
@@ -334,7 +366,9 @@ pub async fn handle_connection(
                 for resp in &responses {
                     send_response(&mut stream, resp).await?;
                 }
-                let success = responses.last().map_or(false, |r| matches!(r, BoltResponse::Success { .. }));
+                let success = responses
+                    .last()
+                    .map_or(false, |r| matches!(r, BoltResponse::Success { .. }));
                 session.state = match session.state.transition(kind, success, has_more) {
                     TransitionResult::NewState(s) => s,
                     _ => BoltState::Failed,

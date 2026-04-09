@@ -27,7 +27,11 @@ impl BoltServer {
     pub async fn run(&self) -> Result<(), BoltError> {
         let mut conn_counter: u64 = 0;
         loop {
-            let permit = self.semaphore.clone().acquire_owned().await
+            let permit = self
+                .semaphore
+                .clone()
+                .acquire_owned()
+                .await
                 .map_err(|_| BoltError::Protocol("semaphore closed".into()))?;
             let (stream, _addr) = self.listener.accept().await?;
             conn_counter += 1;

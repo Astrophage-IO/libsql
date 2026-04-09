@@ -24,14 +24,20 @@ pub fn parse_handshake(data: &[u8; 20]) -> Result<HandshakeResult, BoltError> {
         }
 
         if major == 4 {
-            let min_minor = if range > 0 { minor.saturating_sub(range) } else { minor };
+            let min_minor = if range > 0 {
+                minor.saturating_sub(range)
+            } else {
+                minor
+            };
             if min_minor <= 4 && minor >= 4 {
                 return Ok(HandshakeResult { major: 4, minor: 4 });
             }
         }
     }
 
-    Err(BoltError::Protocol("no compatible Bolt version (need v4.4)".into()))
+    Err(BoltError::Protocol(
+        "no compatible Bolt version (need v4.4)".into(),
+    ))
 }
 
 pub fn handshake_response(result: &HandshakeResult) -> [u8; 4] {

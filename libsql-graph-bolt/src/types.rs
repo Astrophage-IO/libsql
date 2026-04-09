@@ -40,7 +40,10 @@ pub fn pack_params_to_hashmap(params: &HashMap<String, PackValue>) -> HashMap<St
 pub fn query_stats_to_map(stats: &QueryStats) -> HashMap<String, PackValue> {
     let mut map = HashMap::new();
     if stats.nodes_created > 0 {
-        map.insert("nodes-created".into(), PackValue::Int(stats.nodes_created as i64));
+        map.insert(
+            "nodes-created".into(),
+            PackValue::Int(stats.nodes_created as i64),
+        );
     }
     if stats.relationships_created > 0 {
         map.insert(
@@ -49,24 +52,26 @@ pub fn query_stats_to_map(stats: &QueryStats) -> HashMap<String, PackValue> {
         );
     }
     if stats.properties_set > 0 {
-        map.insert("properties-set".into(), PackValue::Int(stats.properties_set as i64));
+        map.insert(
+            "properties-set".into(),
+            PackValue::Int(stats.properties_set as i64),
+        );
     }
     if stats.nodes_deleted > 0 {
-        map.insert("nodes-deleted".into(), PackValue::Int(stats.nodes_deleted as i64));
+        map.insert(
+            "nodes-deleted".into(),
+            PackValue::Int(stats.nodes_deleted as i64),
+        );
     }
     map
 }
 
 pub fn graph_error_to_bolt(err: &GraphError) -> (String, String) {
     match err {
-        GraphError::QueryParse(msg) => (
-            "Neo.ClientError.Statement.SyntaxError".into(),
-            msg.clone(),
-        ),
-        GraphError::QueryPlan(msg) => (
-            "Neo.ClientError.Statement.SyntaxError".into(),
-            msg.clone(),
-        ),
+        GraphError::QueryParse(msg) => {
+            ("Neo.ClientError.Statement.SyntaxError".into(), msg.clone())
+        }
+        GraphError::QueryPlan(msg) => ("Neo.ClientError.Statement.SyntaxError".into(), msg.clone()),
         GraphError::QueryExec(msg) => (
             "Neo.ClientError.Statement.ExecutionFailed".into(),
             msg.clone(),
@@ -109,8 +114,14 @@ mod tests {
 
     #[test]
     fn graph_bool_to_pack() {
-        assert_eq!(graph_value_to_pack(&Value::Bool(true)), PackValue::Bool(true));
-        assert_eq!(graph_value_to_pack(&Value::Bool(false)), PackValue::Bool(false));
+        assert_eq!(
+            graph_value_to_pack(&Value::Bool(true)),
+            PackValue::Bool(true)
+        );
+        assert_eq!(
+            graph_value_to_pack(&Value::Bool(false)),
+            PackValue::Bool(false)
+        );
     }
 
     #[test]
@@ -121,7 +132,10 @@ mod tests {
 
     #[test]
     fn graph_float_to_pack() {
-        assert_eq!(graph_value_to_pack(&Value::Float(3.14)), PackValue::Float(3.14));
+        assert_eq!(
+            graph_value_to_pack(&Value::Float(3.14)),
+            PackValue::Float(3.14)
+        );
     }
 
     #[test]
@@ -156,12 +170,18 @@ mod tests {
 
     #[test]
     fn pack_bool_to_param() {
-        assert!(matches!(pack_to_param_value(&PackValue::Bool(true)), Value::Bool(true)));
+        assert!(matches!(
+            pack_to_param_value(&PackValue::Bool(true)),
+            Value::Bool(true)
+        ));
     }
 
     #[test]
     fn pack_int_to_param() {
-        assert!(matches!(pack_to_param_value(&PackValue::Int(42)), Value::Integer(42)));
+        assert!(matches!(
+            pack_to_param_value(&PackValue::Int(42)),
+            Value::Integer(42)
+        ));
     }
 
     #[test]
@@ -191,17 +211,26 @@ mod tests {
 
     #[test]
     fn pack_map_to_param_returns_null() {
-        assert!(matches!(pack_to_param_value(&PackValue::Map(vec![])), Value::Null));
+        assert!(matches!(
+            pack_to_param_value(&PackValue::Map(vec![])),
+            Value::Null
+        ));
     }
 
     #[test]
     fn pack_bytes_to_param_returns_null() {
-        assert!(matches!(pack_to_param_value(&PackValue::Bytes(vec![1])), Value::Null));
+        assert!(matches!(
+            pack_to_param_value(&PackValue::Bytes(vec![1])),
+            Value::Null
+        ));
     }
 
     #[test]
     fn pack_struct_to_param_returns_null() {
-        let val = PackValue::Struct { tag: 0x4E, fields: vec![] };
+        let val = PackValue::Struct {
+            tag: 0x4E,
+            fields: vec![],
+        };
         assert!(matches!(pack_to_param_value(&val), Value::Null));
     }
 

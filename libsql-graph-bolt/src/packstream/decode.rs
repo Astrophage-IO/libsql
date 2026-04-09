@@ -13,7 +13,8 @@ pub fn decode(buf: &mut Bytes) -> Result<PackValue, BoltError> {
 fn decode_inner(buf: &mut Bytes, depth: usize) -> Result<PackValue, BoltError> {
     if depth > MAX_DEPTH {
         return Err(BoltError::PackStream(format!(
-            "recursion depth {} exceeds maximum of {}", depth, MAX_DEPTH
+            "recursion depth {} exceeds maximum of {}",
+            depth, MAX_DEPTH
         )));
     }
 
@@ -147,7 +148,10 @@ fn decode_inner(buf: &mut Bytes, depth: usize) -> Result<PackValue, BoltError> {
             Ok(PackValue::Struct { tag, fields })
         }
 
-        _ => Err(BoltError::PackStream(format!("unknown marker byte: 0x{:02X}", marker))),
+        _ => Err(BoltError::PackStream(format!(
+            "unknown marker byte: 0x{:02X}",
+            marker
+        ))),
     }
 }
 
@@ -170,16 +174,23 @@ fn read_string(buf: &mut Bytes, len: usize) -> Result<PackValue, BoltError> {
     Ok(PackValue::String(s))
 }
 
-fn validate_collection_size(count: usize, bytes_per_item: usize, buf: &Bytes) -> Result<(), BoltError> {
+fn validate_collection_size(
+    count: usize,
+    bytes_per_item: usize,
+    buf: &Bytes,
+) -> Result<(), BoltError> {
     if count > MAX_COLLECTION_SIZE {
         return Err(BoltError::PackStream(format!(
-            "collection size {} exceeds maximum of {}", count, MAX_COLLECTION_SIZE
+            "collection size {} exceeds maximum of {}",
+            count, MAX_COLLECTION_SIZE
         )));
     }
     let min_bytes = count.saturating_mul(bytes_per_item);
     if min_bytes > buf.remaining() {
         return Err(BoltError::PackStream(format!(
-            "collection claims {} items but only {} bytes remain", count, buf.remaining()
+            "collection claims {} items but only {} bytes remain",
+            count,
+            buf.remaining()
         )));
     }
     Ok(())
@@ -200,7 +211,12 @@ fn read_map(buf: &mut Bytes, count: usize, depth: usize) -> Result<PackValue, Bo
     for _ in 0..count {
         let key = match decode_inner(buf, depth + 1)? {
             PackValue::String(s) => s,
-            other => return Err(BoltError::PackStream(format!("map key must be string, got {:?}", other))),
+            other => {
+                return Err(BoltError::PackStream(format!(
+                    "map key must be string, got {:?}",
+                    other
+                )))
+            }
         };
         let val = decode_inner(buf, depth + 1)?;
         entries.push((key, val));
@@ -211,8 +227,8 @@ fn read_map(buf: &mut Bytes, count: usize, depth: usize) -> Result<PackValue, Bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::BytesMut;
     use crate::packstream::encode;
+    use bytes::BytesMut;
 
     fn decode_bytes(raw: &[u8]) -> PackValue {
         let mut buf = Bytes::from(raw.to_vec());
@@ -303,10 +319,13 @@ mod tests {
     fn test_decode_struct() {
         let raw = vec![0xB1, 0x70, 0xA0];
         let result = decode_bytes(&raw);
-        assert_eq!(result, PackValue::Struct {
-            tag: 0x70,
-            fields: vec![PackValue::Map(vec![])],
-        });
+        assert_eq!(
+            result,
+            PackValue::Struct {
+                tag: 0x70,
+                fields: vec![PackValue::Map(vec![])],
+            }
+        );
     }
 
     #[test]

@@ -331,7 +331,11 @@ mod tests {
 
     #[test]
     fn test_list_small() {
-        let v = PackValue::List(vec![PackValue::Int(1), PackValue::Int(2), PackValue::Int(3)]);
+        let v = PackValue::List(vec![
+            PackValue::Int(1),
+            PackValue::Int(2),
+            PackValue::Int(3),
+        ]);
         assert_eq!(round_trip(&v), v);
     }
 
@@ -367,9 +371,10 @@ mod tests {
     fn test_struct_basic() {
         let v = PackValue::Struct {
             tag: 0x70,
-            fields: vec![PackValue::Map(vec![
-                ("server".into(), PackValue::String("test".into())),
-            ])],
+            fields: vec![PackValue::Map(vec![(
+                "server".into(),
+                PackValue::String("test".into()),
+            )])],
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -403,40 +408,53 @@ mod tests {
     #[test]
     fn test_nested_map_containing_lists() {
         let v = PackValue::Map(vec![
-            ("items".into(), PackValue::List(vec![
-                PackValue::String("a".into()),
-                PackValue::String("b".into()),
-            ])),
-            ("counts".into(), PackValue::List(vec![
-                PackValue::Int(10),
-                PackValue::Int(20),
-            ])),
+            (
+                "items".into(),
+                PackValue::List(vec![
+                    PackValue::String("a".into()),
+                    PackValue::String("b".into()),
+                ]),
+            ),
+            (
+                "counts".into(),
+                PackValue::List(vec![PackValue::Int(10), PackValue::Int(20)]),
+            ),
         ]);
         assert_eq!(round_trip(&v), v);
     }
 
     #[test]
     fn test_deeply_nested() {
-        let v = PackValue::List(vec![
-            PackValue::Map(vec![
-                ("nested".into(), PackValue::List(vec![
-                    PackValue::Struct {
-                        tag: 0x4E,
-                        fields: vec![
-                            PackValue::Int(42),
-                            PackValue::List(vec![PackValue::String("Label".into())]),
-                            PackValue::Map(vec![("key".into(), PackValue::Bool(true))]),
-                        ],
-                    },
-                ])),
-            ]),
-        ]);
+        let v = PackValue::List(vec![PackValue::Map(vec![(
+            "nested".into(),
+            PackValue::List(vec![PackValue::Struct {
+                tag: 0x4E,
+                fields: vec![
+                    PackValue::Int(42),
+                    PackValue::List(vec![PackValue::String("Label".into())]),
+                    PackValue::Map(vec![("key".into(), PackValue::Bool(true))]),
+                ],
+            }]),
+        )])]);
         assert_eq!(round_trip(&v), v);
     }
 
     #[test]
     fn test_int_boundary_values() {
-        for n in [-16, -17, -128, -129, 127, 128, 32767, 32768, -32768, -32769, i64::MAX, i64::MIN] {
+        for n in [
+            -16,
+            -17,
+            -128,
+            -129,
+            127,
+            128,
+            32767,
+            32768,
+            -32768,
+            -32769,
+            i64::MAX,
+            i64::MIN,
+        ] {
             let v = PackValue::Int(n);
             assert_eq!(round_trip(&v), v, "failed for n={}", n);
         }
@@ -481,8 +499,14 @@ mod tests {
             PackValue::List(vec![PackValue::Null, PackValue::Bool(true)]),
             PackValue::Map(vec![]),
             PackValue::Map(vec![("k".into(), PackValue::Int(1))]),
-            PackValue::Struct { tag: 0x70, fields: vec![] },
-            PackValue::Struct { tag: 0x71, fields: vec![PackValue::List(vec![])] },
+            PackValue::Struct {
+                tag: 0x70,
+                fields: vec![],
+            },
+            PackValue::Struct {
+                tag: 0x71,
+                fields: vec![PackValue::List(vec![])],
+            },
         ];
         for v in &values {
             assert_eq!(round_trip(v), *v, "round-trip failed for {:?}", v);

@@ -1,7 +1,7 @@
-pub mod value;
-pub mod encode;
 pub mod decode;
+pub mod encode;
+pub mod value;
 
-pub use value::PackValue;
-pub use encode::encode;
 pub use decode::decode;
+pub use encode::encode;
+pub use value::PackValue;

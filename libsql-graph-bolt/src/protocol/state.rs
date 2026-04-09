@@ -31,7 +31,12 @@ pub enum TransitionResult {
 }
 
 impl BoltState {
-    pub fn transition(&self, request: RequestKind, success: bool, has_more: bool) -> TransitionResult {
+    pub fn transition(
+        &self,
+        request: RequestKind,
+        success: bool,
+        has_more: bool,
+    ) -> TransitionResult {
         use BoltState::*;
         use RequestKind::*;
         use TransitionResult::*;
@@ -396,7 +401,9 @@ mod tests {
 
     #[test]
     fn defunct_is_terminal() {
-        for req in [Hello, Goodbye, Reset, Run, Begin, Commit, Rollback, Discard, Pull] {
+        for req in [
+            Hello, Goodbye, Reset, Run, Begin, Commit, Rollback, Discard, Pull,
+        ] {
             assert_eq!(t(Defunct, req, true, false), Invalid);
             assert_eq!(t(Defunct, req, false, false), Invalid);
         }
@@ -429,63 +436,117 @@ mod tests {
     #[test]
     fn full_autocommit_lifecycle() {
         let mut state = Negotiation;
-        state = match t(state, Hello, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Hello, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Ready);
-        state = match t(state, Run, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Run, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Streaming);
-        state = match t(state, Pull, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Pull, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Ready);
-        state = match t(state, Goodbye, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Goodbye, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Defunct);
     }
 
     #[test]
     fn full_explicit_transaction_lifecycle() {
         let mut state = Negotiation;
-        state = match t(state, Hello, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Hello, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Ready);
-        state = match t(state, Begin, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Begin, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, TxReady);
-        state = match t(state, Run, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Run, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, TxStreaming);
-        state = match t(state, Pull, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Pull, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, TxReady);
-        state = match t(state, Commit, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Commit, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Ready);
-        state = match t(state, Goodbye, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Goodbye, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Defunct);
     }
 
     #[test]
     fn failure_recovery_lifecycle() {
         let mut state = Ready;
-        state = match t(state, Run, false, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Run, false, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Failed);
         assert_eq!(t(state, Run, true, false), Ignored);
         assert_eq!(t(state, Pull, true, false), Ignored);
-        state = match t(state, Reset, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Reset, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Ready);
     }
 
     #[test]
     fn streaming_with_multiple_pulls() {
         let mut state = Streaming;
-        state = match t(state, Pull, true, true) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Pull, true, true) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Streaming);
-        state = match t(state, Pull, true, true) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Pull, true, true) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Streaming);
-        state = match t(state, Pull, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Pull, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, Ready);
     }
 
     #[test]
     fn tx_streaming_multiple_runs() {
         let mut state = TxStreaming;
-        state = match t(state, Pull, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Pull, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, TxReady);
-        state = match t(state, Run, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Run, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, TxStreaming);
-        state = match t(state, Run, true, false) { NewState(s) => s, _ => panic!() };
+        state = match t(state, Run, true, false) {
+            NewState(s) => s,
+            _ => panic!(),
+        };
         assert_eq!(state, TxStreaming);
     }
 }
