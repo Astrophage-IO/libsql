@@ -19,10 +19,7 @@ impl FreeSpaceManager {
         (self.page_size - PAGE_HEADER_SIZE) * 8
     }
 
-    fn bitmap_page_for_slot(
-        &self,
-        global_slot: u64,
-    ) -> (u32, usize) {
+    fn bitmap_page_for_slot(&self, global_slot: u64) -> (u32, usize) {
         let cap = self.bitmap_capacity() as u64;
         let bitmap_index = (global_slot / cap) as u32;
         let bit_offset = (global_slot % cap) as usize;
@@ -48,11 +45,7 @@ impl FreeSpaceManager {
         Ok(())
     }
 
-    pub fn mark_used(
-        &self,
-        pager: &mut impl Pager,
-        global_slot: u64,
-    ) -> Result<(), GraphError> {
+    pub fn mark_used(&self, pager: &mut impl Pager, global_slot: u64) -> Result<(), GraphError> {
         let (bitmap_pgno, bit_offset) = self.bitmap_page_for_slot(global_slot);
         self.ensure_bitmap_page(pager, bitmap_pgno)?;
 
@@ -67,11 +60,7 @@ impl FreeSpaceManager {
         Ok(())
     }
 
-    pub fn mark_free(
-        &self,
-        pager: &mut impl Pager,
-        global_slot: u64,
-    ) -> Result<(), GraphError> {
+    pub fn mark_free(&self, pager: &mut impl Pager, global_slot: u64) -> Result<(), GraphError> {
         let (bitmap_pgno, bit_offset) = self.bitmap_page_for_slot(global_slot);
         if bitmap_pgno > pager.db_size() {
             return Ok(());
@@ -88,11 +77,7 @@ impl FreeSpaceManager {
         Ok(())
     }
 
-    pub fn is_used(
-        &self,
-        pager: &mut impl Pager,
-        global_slot: u64,
-    ) -> Result<bool, GraphError> {
+    pub fn is_used(&self, pager: &mut impl Pager, global_slot: u64) -> Result<bool, GraphError> {
         let (bitmap_pgno, bit_offset) = self.bitmap_page_for_slot(global_slot);
         if bitmap_pgno > pager.db_size() {
             return Ok(false);

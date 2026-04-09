@@ -89,10 +89,7 @@ impl WalWriter {
     }
 
     pub fn open(wal_path: &str) -> Result<Self, GraphError> {
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(wal_path)?;
+        let mut file = OpenOptions::new().read(true).write(true).open(wal_path)?;
 
         let mut header = [0u8; WAL_HEADER_SIZE];
         file.read_exact(&mut header)?;
@@ -375,7 +372,11 @@ impl WalIndex {
     }
 }
 
-pub fn read_frame_data_at(file: &mut File, offset: u64, page_size: usize) -> Result<Vec<u8>, GraphError> {
+pub fn read_frame_data_at(
+    file: &mut File,
+    offset: u64,
+    page_size: usize,
+) -> Result<Vec<u8>, GraphError> {
     file.seek(SeekFrom::Start(offset + FRAME_HEADER_SIZE as u64))?;
     let mut buf = vec![0u8; page_size];
     file.read_exact(&mut buf)?;

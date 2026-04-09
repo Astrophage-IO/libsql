@@ -9,8 +9,8 @@ fn temp_path() -> String {
 }
 
 const LABELS: [&str; 10] = [
-    "Person", "Company", "City", "Country", "Product",
-    "Category", "Tag", "Event", "Location", "Group",
+    "Person", "Company", "City", "Country", "Product", "Category", "Tag", "Event", "Location",
+    "Group",
 ];
 const NODES_PER_LABEL: usize = 50;
 const TOTAL_NODES: usize = LABELS.len() * NODES_PER_LABEL;
@@ -71,11 +71,7 @@ fn stress_500_nodes_4096_page_collision() {
                 2 => {
                     let desc = format!("description_for_{}_{}", label, i);
                     engine
-                        .set_node_property(
-                            nid,
-                            "description",
-                            PropertyValue::ShortString(desc),
-                        )
+                        .set_node_property(nid, "description", PropertyValue::ShortString(desc))
                         .unwrap();
                 }
                 _ => unreachable!(),
@@ -140,21 +136,13 @@ fn stress_500_nodes_large_page() {
                     }
                     1 => {
                         engine
-                            .set_node_property(
-                                nid,
-                                "active",
-                                PropertyValue::Bool(i % 2 == 0),
-                            )
+                            .set_node_property(nid, "active", PropertyValue::Bool(i % 2 == 0))
                             .unwrap();
                     }
                     2 => {
                         let desc = format!("description_for_{}_{}", label, i);
                         engine
-                            .set_node_property(
-                                nid,
-                                "description",
-                                PropertyValue::ShortString(desc),
-                            )
+                            .set_node_property(nid, "description", PropertyValue::ShortString(desc))
                             .unwrap();
                     }
                     _ => unreachable!(),
@@ -179,18 +167,23 @@ fn stress_500_nodes_large_page() {
         for label in &LABELS {
             let q = format!("MATCH (n:{}) RETURN count(n)", label);
             let result = engine.query(&q).unwrap();
-            assert_eq!(result.rows.len(), 1, "expected 1 row for count query on {}", label);
+            assert_eq!(
+                result.rows.len(),
+                1,
+                "expected 1 row for count query on {}",
+                label
+            );
             let count = match &result.rows[0][0] {
                 Value::Integer(v) => *v,
-                other => panic!("expected Integer for count(n) on {}, got {:?}", label, other),
+                other => panic!(
+                    "expected Integer for count(n) on {}, got {:?}",
+                    label, other
+                ),
             };
             assert_eq!(
-                count,
-                NODES_PER_LABEL as i64,
+                count, NODES_PER_LABEL as i64,
                 "label {} expected {} nodes, got {}",
-                label,
-                NODES_PER_LABEL,
-                count
+                label, NODES_PER_LABEL, count
             );
         }
 
@@ -224,7 +217,11 @@ fn stress_500_nodes_large_page() {
         );
 
         let report = libsql_graph::integrity::check_integrity(&mut engine).unwrap();
-        assert!(report.is_ok(), "integrity errors before close: {:?}", report.errors);
+        assert!(
+            report.is_ok(),
+            "integrity errors before close: {:?}",
+            report.errors
+        );
         println!("[PASS] integrity check passed before close");
 
         drop(engine);
@@ -254,12 +251,9 @@ fn stress_500_nodes_large_page() {
                 ),
             };
             assert_eq!(
-                count,
-                NODES_PER_LABEL as i64,
+                count, NODES_PER_LABEL as i64,
                 "reopen: label {} expected {} nodes, got {}",
-                label,
-                NODES_PER_LABEL,
-                count
+                label, NODES_PER_LABEL, count
             );
         }
 
@@ -298,7 +292,11 @@ fn stress_500_nodes_large_page() {
         println!("[PASS] property spot-checks passed after reopen");
 
         let report = libsql_graph::integrity::check_integrity(&mut engine).unwrap();
-        assert!(report.is_ok(), "integrity errors after reopen: {:?}", report.errors);
+        assert!(
+            report.is_ok(),
+            "integrity errors after reopen: {:?}",
+            report.errors
+        );
         println!("[PASS] integrity check passed after reopen");
 
         drop(engine);

@@ -1,5 +1,5 @@
-use libsql_graph::prelude::*;
 use libsql_graph::integrity::{check_integrity, IntegrityError};
+use libsql_graph::prelude::*;
 
 fn temp_path() -> String {
     let f = tempfile::NamedTempFile::new().unwrap();
@@ -24,7 +24,10 @@ fn test_hub_and_50_spokes() {
     }
 
     engine.convert_to_dense(hub).unwrap();
-    assert!(engine.is_dense(hub).unwrap(), "hub should be dense after conversion");
+    assert!(
+        engine.is_dense(hub).unwrap(),
+        "hub should be dense after conversion"
+    );
 
     let neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
     assert_eq!(
@@ -58,7 +61,9 @@ fn test_mixed_rel_types_dense_groups() {
     }
 
     for i in 0..20 {
-        engine.create_relationship(hub, nodes[i], "FOLLOWS").unwrap();
+        engine
+            .create_relationship(hub, nodes[i], "FOLLOWS")
+            .unwrap();
     }
     for i in 20..35 {
         engine.create_relationship(nodes[i], hub, "KNOWS").unwrap();
@@ -96,7 +101,10 @@ fn test_mixed_rel_types_dense_groups() {
         }
     }
 
-    assert_eq!(follows_out, 20, "expected 20 FOLLOWS outgoing, got {follows_out}");
+    assert_eq!(
+        follows_out, 20,
+        "expected 20 FOLLOWS outgoing, got {follows_out}"
+    );
     assert_eq!(knows_in, 15, "expected 15 KNOWS incoming, got {knows_in}");
     assert_eq!(self_loop, 5, "expected 5 SELF loops, got {self_loop}");
 
@@ -171,7 +179,10 @@ fn test_properties_persist_through_dense_conversion() {
 
     let name_before = engine.get_node_property(hub, "name").unwrap();
     let rank_before = engine.get_node_property(hub, "rank").unwrap();
-    assert_eq!(name_before, Some(PropertyValue::ShortString("central".into())));
+    assert_eq!(
+        name_before,
+        Some(PropertyValue::ShortString("central".into()))
+    );
     assert_eq!(rank_before, Some(PropertyValue::Int32(1)));
 
     engine.convert_to_dense(hub).unwrap();
@@ -194,7 +205,11 @@ fn test_properties_persist_through_dense_conversion() {
         .set_node_property(hub, "score", PropertyValue::Int32(99))
         .unwrap();
     let score = engine.get_node_property(hub, "score").unwrap();
-    assert_eq!(score, Some(PropertyValue::Int32(99)), "post-conversion property set failed");
+    assert_eq!(
+        score,
+        Some(PropertyValue::Int32(99)),
+        "post-conversion property set failed"
+    );
 
     drop(engine);
     let _ = std::fs::remove_file(&path);
@@ -218,7 +233,10 @@ fn test_double_convert_is_noop() {
     let neighbors_first = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
 
     engine.convert_to_dense(hub).unwrap();
-    assert!(engine.is_dense(hub).unwrap(), "still dense after second convert");
+    assert!(
+        engine.is_dense(hub).unwrap(),
+        "still dense after second convert"
+    );
 
     let groups_second = engine.get_dense_groups(hub).unwrap();
     let neighbors_second = engine.get_neighbors(hub, Direction::Outgoing).unwrap();

@@ -66,7 +66,11 @@ pub struct ExplainRow {
 fn operation_name(step: &PlanStep) -> String {
     match step {
         PlanStep::NodeScan { optional, .. } => {
-            if *optional { "OptionalNodeScan".into() } else { "NodeScan".into() }
+            if *optional {
+                "OptionalNodeScan".into()
+            } else {
+                "NodeScan".into()
+            }
         }
         PlanStep::Expand { .. } => "Expand".into(),
         PlanStep::Filter { .. } => "Filter".into(),
@@ -83,7 +87,11 @@ fn operation_name(step: &PlanStep) -> String {
         PlanStep::Merge { .. } => "Merge".into(),
         PlanStep::Unwind { .. } => "Unwind".into(),
         PlanStep::IndexedNodeScan { optional, .. } => {
-            if *optional { "OptionalIndexedNodeScan".into() } else { "IndexedNodeScan".into() }
+            if *optional {
+                "OptionalIndexedNodeScan".into()
+            } else {
+                "IndexedNodeScan".into()
+            }
         }
     }
 }
@@ -104,10 +112,7 @@ fn format_step(step: &PlanStep) -> String {
             let props_str = if properties.is_empty() {
                 String::new()
             } else {
-                let kv: Vec<String> = properties
-                    .iter()
-                    .map(|(k, _)| k.clone())
-                    .collect();
+                let kv: Vec<String> = properties.iter().map(|(k, _)| k.clone()).collect();
                 format!(" {{{}}}", kv.join(", "))
             };
             format!("{opt_prefix}NodeScan({variable}{label_str}{props_str})")
@@ -151,10 +156,7 @@ fn format_step(step: &PlanStep) -> String {
                 .as_deref()
                 .map(|l| format!(":{l}"))
                 .unwrap_or_default();
-            format!(
-                "CreateNode({var}{label_str} {{{}}})",
-                properties.len()
-            )
+            format!("CreateNode({var}{label_str} {{{}}})", properties.len())
         }
         PlanStep::CreateRelationship {
             from_var,
@@ -165,9 +167,7 @@ fn format_step(step: &PlanStep) -> String {
             format!("CreateRel({from_var})-[:{rel_type}]->({to_var})")
         }
         PlanStep::SetProperty {
-            variable,
-            property,
-            ..
+            variable, property, ..
         } => {
             format!("SetProperty({variable}.{property})")
         }
@@ -224,10 +224,7 @@ fn format_step(step: &PlanStep) -> String {
                 .as_deref()
                 .map(|l| format!(":{l}"))
                 .unwrap_or_default();
-            format!(
-                "Merge({var}{label_str} {{{}}})",
-                properties.len()
-            )
+            format!("Merge({var}{label_str} {{{}}})", properties.len())
         }
         PlanStep::IndexedNodeScan {
             variable,

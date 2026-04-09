@@ -225,7 +225,12 @@ impl Pager for FilePager {
                 + writer.frame_count() as u64
                     * (wal::frame_header_size() as u64 + self.page_size as u64);
 
-            writer.append_frame(*pgno, data, is_commit, if is_commit { self.db_size } else { 0 })?;
+            writer.append_frame(
+                *pgno,
+                data,
+                is_commit,
+                if is_commit { self.db_size } else { 0 },
+            )?;
             self.wal_index.insert(*pgno, frame_offset);
         }
 
@@ -265,7 +270,11 @@ pub struct PageHandle {
 
 impl PageHandle {
     pub fn new(data: Vec<u8>, pgno: u32, page_size: usize) -> Self {
-        Self { data, pgno, page_size }
+        Self {
+            data,
+            pgno,
+            page_size,
+        }
     }
 
     pub fn page_number(&self) -> u32 {
@@ -554,7 +563,11 @@ mod tests {
             engine.create_node("Person").unwrap();
             engine.create_node("Company").unwrap();
             engine
-                .set_node_property(0, "name", crate::storage::property_store::PropertyValue::ShortString("Alice".into()))
+                .set_node_property(
+                    0,
+                    "name",
+                    crate::storage::property_store::PropertyValue::ShortString("Alice".into()),
+                )
                 .unwrap();
             engine.create_relationship(0, 1, "WORKS_AT").unwrap();
         }
@@ -566,7 +579,9 @@ mod tests {
             let name = engine.get_node_property(0, "name").unwrap();
             assert_eq!(
                 name,
-                Some(crate::storage::property_store::PropertyValue::ShortString("Alice".into()))
+                Some(crate::storage::property_store::PropertyValue::ShortString(
+                    "Alice".into()
+                ))
             );
         }
 
@@ -574,7 +589,11 @@ mod tests {
             let mut engine = GraphEngine::open(&path).unwrap();
             engine.create_node("Person").unwrap();
             engine
-                .set_node_property(2, "name", crate::storage::property_store::PropertyValue::ShortString("Bob".into()))
+                .set_node_property(
+                    2,
+                    "name",
+                    crate::storage::property_store::PropertyValue::ShortString("Bob".into()),
+                )
                 .unwrap();
         }
 

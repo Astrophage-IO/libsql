@@ -24,18 +24,10 @@ fn test_normal_close_reopen_20_nodes_with_properties() {
             let nid = engine.create_node("Item").unwrap();
             assert_eq!(nid, i);
             engine
-                .set_node_property(
-                    nid,
-                    "idx",
-                    PropertyValue::Int32(i as i32),
-                )
+                .set_node_property(nid, "idx", PropertyValue::Int32(i as i32))
                 .unwrap();
             engine
-                .set_node_property(
-                    nid,
-                    "name",
-                    PropertyValue::ShortString(format!("node_{i}")),
-                )
+                .set_node_property(nid, "name", PropertyValue::ShortString(format!("node_{i}")))
                 .unwrap();
         }
         assert_eq!(engine.node_count(), 20);
@@ -246,11 +238,7 @@ fn test_rapid_open_close_cycles() {
         );
         let nid = engine.create_node("Cycle").unwrap();
         engine
-            .set_node_property(
-                nid,
-                "cycle",
-                PropertyValue::Int32(cycle as i32),
-            )
+            .set_node_property(nid, "cycle", PropertyValue::Int32(cycle as i32))
             .unwrap();
         assert_eq!(engine.node_count(), cycle + 1);
         drop(engine);

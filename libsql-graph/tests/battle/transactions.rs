@@ -77,12 +77,16 @@ fn t3_next_node_id_restored_after_rollback() {
     engine.rollback().unwrap();
 
     assert_eq!(
-        engine.db().header().next_node_id, 50,
+        engine.db().header().next_node_id,
+        50,
         "next_node_id should revert to 50 after rollback"
     );
 
     let new_id = engine.create_node("Post").unwrap();
-    assert_eq!(new_id, 50, "first node after rollback should get id 50, not 100");
+    assert_eq!(
+        new_id, 50,
+        "first node after rollback should get id 50, not 100"
+    );
     assert_eq!(engine.node_count(), 51);
 
     drop(engine);
@@ -115,7 +119,9 @@ fn t4_commit_nodes_rels_properties() {
 
     let r0 = engine.create_relationship(alice, bob, "KNOWS").unwrap();
     let _r1 = engine.create_relationship(alice, acme, "WORKS_AT").unwrap();
-    engine.set_rel_property(r0, "since", PropertyValue::Int32(2020)).unwrap();
+    engine
+        .set_rel_property(r0, "since", PropertyValue::Int32(2020))
+        .unwrap();
 
     engine.commit().unwrap();
 
@@ -190,7 +196,9 @@ fn t6_transaction_batch_all_valid() {
     }
     assert_eq!(engine.node_count(), 3);
 
-    let result = engine.query("MATCH (h:Hero) RETURN h.name ORDER BY h.name").unwrap();
+    let result = engine
+        .query("MATCH (h:Hero) RETURN h.name ORDER BY h.name")
+        .unwrap();
     assert_eq!(result.rows.len(), 3);
 
     drop(engine);
@@ -218,12 +226,14 @@ fn t7_transaction_batch_partial_failure_rolls_back() {
     }
 
     assert_eq!(
-        engine.node_count(), 1,
+        engine.node_count(),
+        1,
         "node count must remain 1 — the two valid CREATEs should be rolled back"
     );
 
     assert_eq!(
-        engine.db().header().next_node_id, 1,
+        engine.db().header().next_node_id,
+        1,
         "next_node_id must revert to 1 — batch rollback must undo the id counter"
     );
 
@@ -273,10 +283,20 @@ fn t8_persistence_across_reopen() {
     {
         let mut engine = GraphEngine::open(&path).unwrap();
 
-        assert_eq!(engine.node_count(), 10, "committed nodes must survive reopen");
-        assert_eq!(engine.edge_count(), 2, "committed edges must survive reopen");
+        assert_eq!(
+            engine.node_count(),
+            10,
+            "committed nodes must survive reopen"
+        );
+        assert_eq!(
+            engine.edge_count(),
+            2,
+            "committed edges must survive reopen"
+        );
 
-        let result = engine.query("MATCH (n:Persistent) RETURN count(*)").unwrap();
+        let result = engine
+            .query("MATCH (n:Persistent) RETURN count(*)")
+            .unwrap();
         assert_eq!(result.rows[0][0], Value::Integer(10));
 
         let result = engine.query("MATCH (n) RETURN count(*)").unwrap();
@@ -292,12 +312,15 @@ fn t8_persistence_across_reopen() {
         assert_eq!(val, Some(PropertyValue::Int32(9)));
 
         let result = engine
-            .query("MATCH (a:Persistent)-[:LINKED]->(b:Persistent) RETURN a.val, b.val ORDER BY a.val")
+            .query(
+                "MATCH (a:Persistent)-[:LINKED]->(b:Persistent) RETURN a.val, b.val ORDER BY a.val",
+            )
             .unwrap();
         assert_eq!(result.rows.len(), 2);
 
         assert_eq!(
-            engine.db().header().next_node_id, 10,
+            engine.db().header().next_node_id,
+            10,
             "next_node_id should be 10 — rolled-back ghost nodes must not have advanced it"
         );
 

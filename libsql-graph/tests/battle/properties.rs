@@ -102,11 +102,7 @@ fn test_twenty_properties_on_single_node() {
     for i in 0..20 {
         let key = format!("prop_{i}");
         let val = engine.get_node_property(0, &key).unwrap();
-        assert_eq!(
-            val,
-            Some(PropertyValue::Int32(i)),
-            "mismatch for {key}"
-        );
+        assert_eq!(val, Some(PropertyValue::Int32(i)), "mismatch for {key}");
     }
 
     drop(engine);

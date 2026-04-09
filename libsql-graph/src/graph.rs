@@ -5,16 +5,14 @@ use crate::cypher::explain;
 use crate::cypher::{optimizer, parser, planner};
 use crate::error::GraphError;
 use crate::storage::database::GraphDatabase;
-use crate::storage::pager::Pager;
-use crate::storage::pager_bridge::FilePager;
-use crate::storage::node_store::{NodeRecord, NodeStore};
-use crate::storage::property_store::{
-    PropertyBlock, PropertyRecord, PropertyStore, PropertyValue,
-};
-use crate::storage::record::RecordAddress;
-use crate::storage::rel_store::{RelRecord, RelStore};
 use crate::storage::dense::RelGroupStore;
 use crate::storage::label_index::LabelIndex;
+use crate::storage::node_store::{NodeRecord, NodeStore};
+use crate::storage::pager::Pager;
+use crate::storage::pager_bridge::FilePager;
+use crate::storage::property_store::{PropertyBlock, PropertyRecord, PropertyStore, PropertyValue};
+use crate::storage::record::RecordAddress;
+use crate::storage::rel_store::{RelRecord, RelStore};
 use crate::storage::stats::GraphStats;
 use crate::storage::string_overflow::StringOverflowStore;
 use crate::storage::token_store::{
@@ -276,12 +274,10 @@ impl<P: Pager> GraphEngine<P> {
 
     pub fn get_or_create_label(&mut self, name: &str) -> Result<u32, GraphError> {
         let next = self.db.header().next_token_id;
-        if let Some(id) = self.token_store.find_by_name(
-            self.db.pager(),
-            name,
-            TOKEN_KIND_LABEL,
-            next,
-        )? {
+        if let Some(id) =
+            self.token_store
+                .find_by_name(self.db.pager(), name, TOKEN_KIND_LABEL, next)?
+        {
             return Ok(id);
         }
 
@@ -294,12 +290,10 @@ impl<P: Pager> GraphEngine<P> {
 
     pub fn get_or_create_rel_type(&mut self, name: &str) -> Result<u32, GraphError> {
         let next = self.db.header().next_token_id;
-        if let Some(id) = self.token_store.find_by_name(
-            self.db.pager(),
-            name,
-            TOKEN_KIND_REL_TYPE,
-            next,
-        )? {
+        if let Some(id) =
+            self.token_store
+                .find_by_name(self.db.pager(), name, TOKEN_KIND_REL_TYPE, next)?
+        {
             return Ok(id);
         }
 
@@ -477,19 +471,23 @@ impl<P: Pager> GraphEngine<P> {
         direction: Direction,
     ) -> Result<Vec<(u64, RecordAddress)>, GraphError> {
         let node_addr = self.node_store.address(node_id);
-        let groups = self.rel_group_store.iter_groups(self.db.pager(), node.first_rel)?;
+        let groups = self
+            .rel_group_store
+            .iter_groups(self.db.pager(), node.first_rel)?;
         let mut neighbors = Vec::new();
 
         for (_, group) in &groups {
             let chain_starts: Vec<RecordAddress> = match direction {
                 Direction::Outgoing => vec![group.out_first_rel, group.loop_first_rel],
                 Direction::Incoming => vec![group.in_first_rel, group.loop_first_rel],
-                Direction::Both => vec![group.out_first_rel, group.in_first_rel, group.loop_first_rel],
+                Direction::Both => vec![
+                    group.out_first_rel,
+                    group.in_first_rel,
+                    group.loop_first_rel,
+                ],
             };
-            let chain_starts: Vec<RecordAddress> = chain_starts
-                .into_iter()
-                .filter(|a| !a.is_null())
-                .collect();
+            let chain_starts: Vec<RecordAddress> =
+                chain_starts.into_iter().filter(|a| !a.is_null()).collect();
 
             for start in chain_starts {
                 let mut current = start;
@@ -551,7 +549,10 @@ impl<P: Pager> GraphEngine<P> {
         map
     }
 
-    fn optimize_plan(&mut self, plan: crate::cypher::planner::QueryPlan) -> crate::cypher::planner::QueryPlan {
+    fn optimize_plan(
+        &mut self,
+        plan: crate::cypher::planner::QueryPlan,
+    ) -> crate::cypher::planner::QueryPlan {
         let roots = self.label_index_roots();
         let names = self.label_name_to_id();
         optimizer::optimize(plan, &self.stats, &roots, &names)
@@ -615,12 +616,10 @@ impl<P: Pager> GraphEngine<P> {
     pub fn get_or_create_prop_key(&mut self, name: &str) -> Result<u16, GraphError> {
         let next = self.db.header().next_token_id;
         for kind in [TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE, TOKEN_KIND_PROPERTY] {
-            if let Some(id) = self.token_store.find_by_name(
-                self.db.pager(),
-                name,
-                kind,
-                next,
-            )? {
+            if let Some(id) = self
+                .token_store
+                .find_by_name(self.db.pager(), name, kind, next)?
+            {
                 return Ok(id as u16);
             }
         }
@@ -633,24 +632,21 @@ impl<P: Pager> GraphEngine<P> {
     fn find_prop_key(&mut self, name: &str) -> Result<Option<u16>, GraphError> {
         let next = self.db.header().next_token_id;
         for kind in [TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE, TOKEN_KIND_PROPERTY] {
-            if let Some(id) = self.token_store.find_by_name(
-                self.db.pager(),
-                name,
-                kind,
-                next,
-            )? {
+            if let Some(id) = self
+                .token_store
+                .find_by_name(self.db.pager(), name, kind, next)?
+            {
                 return Ok(Some(id as u16));
             }
         }
         Ok(None)
     }
 
-    fn store_property_value(
-        &mut self,
-        value: PropertyValue,
-    ) -> Result<PropertyValue, GraphError> {
+    fn store_property_value(&mut self, value: PropertyValue) -> Result<PropertyValue, GraphError> {
         match &value {
-            PropertyValue::ShortString(s) if s.len() > crate::storage::property_store::PROP_VALUE_MAX_INLINE => {
+            PropertyValue::ShortString(s)
+                if s.len() > crate::storage::property_store::PROP_VALUE_MAX_INLINE =>
+            {
                 let addr = self.string_overflow.write_string(self.db.pager(), s)?;
                 Ok(PropertyValue::Overflow(addr))
             }
@@ -696,9 +692,7 @@ impl<P: Pager> GraphEngine<P> {
             let mut current = node.first_prop;
             let mut prev = RecordAddress::NULL;
             while !current.is_null() {
-                let mut record = self
-                    .property_store
-                    .read_record(self.db.pager(), current)?;
+                let mut record = self.property_store.read_record(self.db.pager(), current)?;
                 if record.set_block(key_id, PropertyBlock::new(key_id, &value)) {
                     self.property_store
                         .write_record(self.db.pager(), current, &record)?;
@@ -711,12 +705,10 @@ impl<P: Pager> GraphEngine<P> {
             let prop_id = self.db.next_prop_id();
             let mut new_record = PropertyRecord::new();
             new_record.add_block(PropertyBlock::new(key_id, &value));
-            let new_addr = self
-                .property_store
-                .create_record(self.db.pager(), prop_id, &new_record)?;
-            let mut prev_record = self
-                .property_store
-                .read_record(self.db.pager(), prev)?;
+            let new_addr =
+                self.property_store
+                    .create_record(self.db.pager(), prop_id, &new_record)?;
+            let mut prev_record = self.property_store.read_record(self.db.pager(), prev)?;
             prev_record.next_prop = new_addr;
             self.property_store
                 .write_record(self.db.pager(), prev, &prev_record)?;
@@ -739,7 +731,8 @@ impl<P: Pager> GraphEngine<P> {
         if node.first_prop.is_null() {
             return Ok(None);
         }
-        let raw = self.property_store
+        let raw = self
+            .property_store
             .get_property(self.db.pager(), node.first_prop, key_id)?;
         match raw {
             Some(val) => Ok(Some(self.resolve_property_value(val)?)),
@@ -796,9 +789,7 @@ impl<P: Pager> GraphEngine<P> {
             let mut current = rel.first_prop;
             let mut prev = RecordAddress::NULL;
             while !current.is_null() {
-                let mut record = self
-                    .property_store
-                    .read_record(self.db.pager(), current)?;
+                let mut record = self.property_store.read_record(self.db.pager(), current)?;
                 if record.set_block(key_id, PropertyBlock::new(key_id, &value)) {
                     self.property_store
                         .write_record(self.db.pager(), current, &record)?;
@@ -811,12 +802,10 @@ impl<P: Pager> GraphEngine<P> {
             let prop_id = self.db.next_prop_id();
             let mut new_record = PropertyRecord::new();
             new_record.add_block(PropertyBlock::new(key_id, &value));
-            let new_addr = self
-                .property_store
-                .create_record(self.db.pager(), prop_id, &new_record)?;
-            let mut prev_record = self
-                .property_store
-                .read_record(self.db.pager(), prev)?;
+            let new_addr =
+                self.property_store
+                    .create_record(self.db.pager(), prop_id, &new_record)?;
+            let mut prev_record = self.property_store.read_record(self.db.pager(), prev)?;
             prev_record.next_prop = new_addr;
             self.property_store
                 .write_record(self.db.pager(), prev, &prev_record)?;
@@ -839,7 +828,8 @@ impl<P: Pager> GraphEngine<P> {
         if rel.first_prop.is_null() {
             return Ok(None);
         }
-        let raw = self.property_store
+        let raw = self
+            .property_store
             .get_property(self.db.pager(), rel.first_prop, key_id)?;
         match raw {
             Some(val) => Ok(Some(self.resolve_property_value(val)?)),
@@ -920,8 +910,8 @@ impl<P: Pager> GraphEngine<P> {
             }
             let is_source = rel.source_node == node_addr;
             let rpp = self.rel_store.records_per_page() as u64;
-            let rel_id = (current.page - self.db.header().rel_store_root) as u64 * rpp
-                + current.slot as u64;
+            let rel_id =
+                (current.page - self.db.header().rel_store_root) as u64 * rpp + current.slot as u64;
             rel_ids_to_delete.push(rel_id);
 
             current = if is_source {
@@ -1067,16 +1057,20 @@ impl<P: Pager> GraphEngine<P> {
                 first_group_addr = group_addr;
             }
             if !prev_group_addr.is_null() {
-                let mut prev = self.rel_group_store.read_group(self.db.pager(), prev_group_addr)?;
+                let mut prev = self
+                    .rel_group_store
+                    .read_group(self.db.pager(), prev_group_addr)?;
                 prev.next_group = group_addr;
-                self.rel_group_store.write_group(self.db.pager(), prev_group_addr, &prev)?;
+                self.rel_group_store
+                    .write_group(self.db.pager(), prev_group_addr, &prev)?;
             }
             prev_group_addr = group_addr;
         }
 
         node.first_rel = first_group_addr;
         node.set_dense(true);
-        self.node_store.write_node(self.db.pager(), node_id, &node)?;
+        self.node_store
+            .write_node(self.db.pager(), node_id, &node)?;
 
         self.auto_commit(auto)
     }
@@ -1095,7 +1089,9 @@ impl<P: Pager> GraphEngine<P> {
             return Ok(vec![]);
         }
 
-        let groups = self.rel_group_store.iter_groups(self.db.pager(), node.first_rel)?;
+        let groups = self
+            .rel_group_store
+            .iter_groups(self.db.pager(), node.first_rel)?;
         Ok(groups
             .into_iter()
             .map(|(_, g)| (g.type_token_id, g.out_count, g.in_count, g.loop_count))
@@ -1194,7 +1190,8 @@ impl<P: Pager> GraphEngine<P> {
             p.data_mut()?.fill(0);
             self.db.pager().write_page(&p)?;
             for &nid in node_ids {
-                self.label_index.set_label(self.db.pager(), label_id, nid, root)?;
+                self.label_index
+                    .set_label(self.db.pager(), label_id, nid, root)?;
             }
             new_roots.insert(label_id, root);
         }
@@ -1283,7 +1280,11 @@ impl std::fmt::Display for ProfileResult {
             writeln!(f, "Nodes created: {}", self.result.stats.nodes_created)?;
         }
         if self.result.stats.relationships_created > 0 {
-            writeln!(f, "Rels created: {}", self.result.stats.relationships_created)?;
+            writeln!(
+                f,
+                "Rels created: {}",
+                self.result.stats.relationships_created
+            )?;
         }
         if self.result.stats.properties_set > 0 {
             writeln!(f, "Props set: {}", self.result.stats.properties_set)?;
@@ -1795,11 +1796,7 @@ mod tests {
         for i in 0..6 {
             let spoke = engine.create_node("Person").unwrap();
             engine
-                .set_node_property(
-                    spoke,
-                    "name",
-                    PropertyValue::ShortString(format!("S{i}")),
-                )
+                .set_node_property(spoke, "name", PropertyValue::ShortString(format!("S{i}")))
                 .unwrap();
             engine.create_relationship(hub, spoke, "KNOWS").unwrap();
         }
@@ -1900,9 +1897,7 @@ mod tests {
             .set_node_property(0, "name", PropertyValue::ShortString("Alice".into()))
             .unwrap();
 
-        let profile = engine
-            .profile("MATCH (a:Person) RETURN a.name")
-            .unwrap();
+        let profile = engine.profile("MATCH (a:Person) RETURN a.name").unwrap();
         assert!(profile.result.rows.len() >= 1);
         assert!(profile.plan.contains("NodeScan"));
         assert!(profile.total_time_us > 0);
@@ -1951,7 +1946,10 @@ mod tests {
         );
 
         let results = TransactionBatch::new(&mut engine)
-            .add_with_params("MATCH (a:Person) WHERE a.name = $name RETURN a.name", params)
+            .add_with_params(
+                "MATCH (a:Person) WHERE a.name = $name RETURN a.name",
+                params,
+            )
             .execute()
             .unwrap();
 
@@ -2238,12 +2236,8 @@ mod tests {
             engine.create_node("Node").unwrap();
         }
         for i in 0..10u64 {
-            engine
-                .create_relationship(i, (i + 1) % 10, "LINK")
-                .unwrap();
-            engine
-                .create_relationship(i, (i + 2) % 10, "LINK")
-                .unwrap();
+            engine.create_relationship(i, (i + 1) % 10, "LINK").unwrap();
+            engine.create_relationship(i, (i + 2) % 10, "LINK").unwrap();
         }
 
         assert_eq!(engine.stats().node_count, 10);
@@ -2274,7 +2268,8 @@ mod tests {
             optional: false,
         };
 
-        let est = cost::estimate_step_cost_with_label_id(&step, engine.stats(), Some(person_label_id));
+        let est =
+            cost::estimate_step_cost_with_label_id(&step, engine.stats(), Some(person_label_id));
         assert!((est.estimated_cost - 100.0).abs() < f64::EPSILON);
 
         drop(engine);
@@ -2379,10 +2374,10 @@ mod tests {
         names.insert("Person".to_string(), person_label_id);
         let optimized = optimizer::optimize(plan, engine.stats(), &roots, &names);
 
-        assert!(optimized.steps.iter().any(|s| matches!(
-            s,
-            crate::cypher::planner::PlanStep::IndexedNodeScan { .. }
-        )));
+        assert!(optimized
+            .steps
+            .iter()
+            .any(|s| matches!(s, crate::cypher::planner::PlanStep::IndexedNodeScan { .. })));
 
         let explain_text = crate::cypher::explain::explain(&optimized);
         assert!(explain_text.contains("IndexedNodeScan"));
@@ -2406,10 +2401,13 @@ mod tests {
                 .unwrap();
         }
         for i in 0..10u64 {
-            engine.create_relationship(i, (i + 1) % 10, "KNOWS").unwrap();
+            engine
+                .create_relationship(i, (i + 1) % 10, "KNOWS")
+                .unwrap();
         }
 
-        let stmt = parser::parse("MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 25 RETURN b").unwrap();
+        let stmt =
+            parser::parse("MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 25 RETURN b").unwrap();
         let plan = planner::plan(&stmt).unwrap();
         let names = engine.label_name_to_id();
         let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
@@ -2513,21 +2511,20 @@ mod tests {
                 .unwrap();
         }
         for i in 0..20u64 {
-            engine.create_relationship(i, (i + 1) % 20, "KNOWS").unwrap();
+            engine
+                .create_relationship(i, (i + 1) % 20, "KNOWS")
+                .unwrap();
         }
 
         let cypher = "MATCH (a:Person)-[:KNOWS]->(b) WHERE a.age > 30 RETURN a.name, b.name";
         let stmt = parser::parse(cypher).unwrap();
         let plan = planner::plan(&stmt).unwrap();
 
-        let unoptimized_result =
-            executor::execute(&mut engine, &plan, &HashMap::new()).unwrap();
+        let unoptimized_result = executor::execute(&mut engine, &plan, &HashMap::new()).unwrap();
 
         let names = engine.label_name_to_id();
-        let optimized =
-            optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
-        let optimized_result =
-            executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
+        let optimized = optimizer::optimize(plan, engine.stats(), &HashMap::new(), &names);
+        let optimized_result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
 
         assert_eq!(unoptimized_result.columns, optimized_result.columns);
         assert_eq!(unoptimized_result.rows.len(), optimized_result.rows.len());
@@ -2571,10 +2568,10 @@ mod tests {
             &optimized.steps[0],
             crate::cypher::planner::PlanStep::NodeScan { label: Some(l), .. } if l == "Person"
         ));
-        assert!(!optimized.steps.iter().any(|s| matches!(
-            s,
-            crate::cypher::planner::PlanStep::IndexedNodeScan { .. }
-        )));
+        assert!(!optimized
+            .steps
+            .iter()
+            .any(|s| matches!(s, crate::cypher::planner::PlanStep::IndexedNodeScan { .. })));
 
         let result = executor::execute(&mut engine, &optimized, &HashMap::new()).unwrap();
         assert_eq!(result.rows.len(), 10);
@@ -2676,11 +2673,7 @@ mod tests {
             assert_eq!(stats.label_counts.get(&person_label), Some(&10));
             assert_eq!(stats.label_counts.get(&city_label), Some(&5));
 
-            let knows_type = stats
-                .rel_type_counts
-                .values()
-                .copied()
-                .collect::<Vec<_>>();
+            let knows_type = stats.rel_type_counts.values().copied().collect::<Vec<_>>();
             assert!(knows_type.contains(&8));
             assert!(knows_type.contains(&3));
         }
@@ -2712,14 +2705,10 @@ mod tests {
         assert!(names.contains_key("Person"));
         assert!(names.contains_key("City"));
 
-        let explain = engine
-            .explain("MATCH (p:Person) RETURN p")
-            .unwrap();
+        let explain = engine.explain("MATCH (p:Person) RETURN p").unwrap();
         assert!(explain.contains("IndexedNodeScan"));
 
-        let result = engine
-            .query("MATCH (p:Person) RETURN p")
-            .unwrap();
+        let result = engine.query("MATCH (p:Person) RETURN p").unwrap();
         assert_eq!(result.rows.len(), 20);
 
         drop(engine);
@@ -2783,8 +2772,7 @@ mod tests {
                 let mut next_frontier = Vec::new();
                 for &nid in &frontier {
                     if visited.insert(nid) {
-                        let hop_neighbors =
-                            engine.get_neighbors(nid, Direction::Outgoing).unwrap();
+                        let hop_neighbors = engine.get_neighbors(nid, Direction::Outgoing).unwrap();
                         for (next_id, _) in hop_neighbors {
                             next_frontier.push(next_id);
                         }
@@ -2800,9 +2788,7 @@ mod tests {
             let non_count_errors: Vec<_> = report
                 .errors
                 .iter()
-                .filter(|e| {
-                    !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. })
-                })
+                .filter(|e| !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. }))
                 .collect();
             assert!(
                 non_count_errors.is_empty(),
@@ -2825,9 +2811,7 @@ mod tests {
             let non_count_errors: Vec<_> = report
                 .errors
                 .iter()
-                .filter(|e| {
-                    !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. })
-                })
+                .filter(|e| !matches!(e, crate::integrity::IntegrityError::CountMismatch { .. }))
                 .collect();
             assert!(
                 non_count_errors.is_empty(),

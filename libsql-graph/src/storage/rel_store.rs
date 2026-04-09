@@ -1,9 +1,7 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
 use crate::storage::pager::Pager;
-use crate::storage::record::{
-    address_for_id, records_per_page, RecordAddress, REL_RECORD_SIZE,
-};
+use crate::storage::record::{address_for_id, records_per_page, RecordAddress, REL_RECORD_SIZE};
 
 pub const REL_FLAG_IN_USE: u8 = 0b1000_0000;
 pub const REL_FLAG_FIRST_IN_SRC: u8 = 0b0100_0000;
@@ -25,11 +23,7 @@ pub struct RelRecord {
 }
 
 impl RelRecord {
-    pub fn new(
-        type_token_id: u32,
-        source_node: RecordAddress,
-        target_node: RecordAddress,
-    ) -> Self {
+    pub fn new(type_token_id: u32, source_node: RecordAddress, target_node: RecordAddress) -> Self {
         Self {
             flags: REL_FLAG_IN_USE,
             type_token_id,
@@ -213,11 +207,7 @@ impl RelStore {
         Ok(addr)
     }
 
-    pub fn read_rel(
-        &self,
-        pager: &mut impl Pager,
-        rel_id: u64,
-    ) -> Result<RelRecord, GraphError> {
+    pub fn read_rel(&self, pager: &mut impl Pager, rel_id: u64) -> Result<RelRecord, GraphError> {
         let addr = self.address(rel_id);
         if addr.page > pager.db_size() {
             return Err(GraphError::InvalidPageNumber(addr.page));
@@ -272,11 +262,7 @@ impl RelStore {
         Ok(())
     }
 
-    pub fn delete_rel(
-        &self,
-        pager: &mut impl Pager,
-        rel_id: u64,
-    ) -> Result<(), GraphError> {
+    pub fn delete_rel(&self, pager: &mut impl Pager, rel_id: u64) -> Result<(), GraphError> {
         let addr = self.address(rel_id);
         if addr.page > pager.db_size() {
             return Err(GraphError::InvalidPageNumber(addr.page));

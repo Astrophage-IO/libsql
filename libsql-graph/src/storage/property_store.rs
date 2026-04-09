@@ -102,12 +102,8 @@ impl PropertyValue {
         match prop_type {
             PropertyType::Null => Self::Null,
             PropertyType::Bool => Self::Bool(data[0] != 0),
-            PropertyType::Int32 => {
-                Self::Int32(i32::from_le_bytes(data[..4].try_into().unwrap()))
-            }
-            PropertyType::Int64 => {
-                Self::Int64(i64::from_le_bytes(data[..8].try_into().unwrap()))
-            }
+            PropertyType::Int32 => Self::Int32(i32::from_le_bytes(data[..4].try_into().unwrap())),
+            PropertyType::Int64 => Self::Int64(i64::from_le_bytes(data[..8].try_into().unwrap())),
             PropertyType::Float64 => {
                 Self::Float64(f64::from_le_bytes(data[..8].try_into().unwrap()))
             }
@@ -115,10 +111,10 @@ impl PropertyValue {
                 let s = std::str::from_utf8(&data[..size as usize]).unwrap_or("");
                 Self::ShortString(s.to_string())
             }
-            PropertyType::String | PropertyType::Blob
-            | PropertyType::StringArray | PropertyType::IntArray => {
-                Self::Overflow(RecordAddress::read(data))
-            }
+            PropertyType::String
+            | PropertyType::Blob
+            | PropertyType::StringArray
+            | PropertyType::IntArray => Self::Overflow(RecordAddress::read(data)),
         }
     }
 }
@@ -508,7 +504,10 @@ mod tests {
     fn test_property_record_roundtrip() {
         let mut record = PropertyRecord::new();
         record.add_block(PropertyBlock::new(1, &PropertyValue::Int32(100)));
-        record.add_block(PropertyBlock::new(2, &PropertyValue::ShortString("Alice".into())));
+        record.add_block(PropertyBlock::new(
+            2,
+            &PropertyValue::ShortString("Alice".into()),
+        ));
         record.add_block(PropertyBlock::new(3, &PropertyValue::Bool(true)));
         record.next_prop = RecordAddress::new(10, 5);
 
@@ -573,7 +572,10 @@ mod tests {
         let store = PropertyStore::new(root, 4096);
 
         let mut record = PropertyRecord::new();
-        record.add_block(PropertyBlock::new(1, &PropertyValue::ShortString("Alice".into())));
+        record.add_block(PropertyBlock::new(
+            1,
+            &PropertyValue::ShortString("Alice".into()),
+        ));
         record.add_block(PropertyBlock::new(2, &PropertyValue::Int32(28)));
 
         pager.begin_write().unwrap();
@@ -640,7 +642,9 @@ mod tests {
         let missing = store.get_property(&mut pager, addr, 99).unwrap();
         assert_eq!(missing, None);
 
-        let null_addr = store.get_property(&mut pager, RecordAddress::NULL, 1).unwrap();
+        let null_addr = store
+            .get_property(&mut pager, RecordAddress::NULL, 1)
+            .unwrap();
         assert_eq!(null_addr, None);
 
         let _ = std::fs::remove_file(&path);

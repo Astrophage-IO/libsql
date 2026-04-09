@@ -54,24 +54,24 @@ pub enum Token {
     Colon,
     Comma,
     Dot,
-    Arrow,       // ->
+    Arrow,        // ->
     DashLBracket, // -[
     RBracketDash, // ]-
-    LtDash,      // <-
-    DashGt,      // ->  (same as Arrow but used in rel context)
-    Dash,        // -
+    LtDash,       // <-
+    DashGt,       // ->  (same as Arrow but used in rel context)
+    Dash,         // -
     Eq,
-    Neq,         // <>
+    Neq, // <>
     Lt,
     Gt,
-    Lte,         // <=
-    Gte,         // >=
+    Lte, // <=
+    Gte, // >=
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
-    DotDot,      // ..
+    DotDot, // ..
 
     Eof,
 }
@@ -138,17 +138,50 @@ impl Lexer {
         };
 
         match ch {
-            '(' => { self.advance(); Ok(Token::LParen) }
-            ')' => { self.advance(); Ok(Token::RParen) }
-            '{' => { self.advance(); Ok(Token::LBrace) }
-            '}' => { self.advance(); Ok(Token::RBrace) }
-            ':' => { self.advance(); Ok(Token::Colon) }
-            ',' => { self.advance(); Ok(Token::Comma) }
-            '+' => { self.advance(); Ok(Token::Plus) }
-            '*' => { self.advance(); Ok(Token::Star) }
-            '%' => { self.advance(); Ok(Token::Percent) }
-            '/' => { self.advance(); Ok(Token::Slash) }
-            '[' => { self.advance(); Ok(Token::LBracket) }
+            '(' => {
+                self.advance();
+                Ok(Token::LParen)
+            }
+            ')' => {
+                self.advance();
+                Ok(Token::RParen)
+            }
+            '{' => {
+                self.advance();
+                Ok(Token::LBrace)
+            }
+            '}' => {
+                self.advance();
+                Ok(Token::RBrace)
+            }
+            ':' => {
+                self.advance();
+                Ok(Token::Colon)
+            }
+            ',' => {
+                self.advance();
+                Ok(Token::Comma)
+            }
+            '+' => {
+                self.advance();
+                Ok(Token::Plus)
+            }
+            '*' => {
+                self.advance();
+                Ok(Token::Star)
+            }
+            '%' => {
+                self.advance();
+                Ok(Token::Percent)
+            }
+            '/' => {
+                self.advance();
+                Ok(Token::Slash)
+            }
+            '[' => {
+                self.advance();
+                Ok(Token::LBracket)
+            }
             '.' => {
                 self.advance();
                 if self.peek() == Some('.') {
@@ -252,7 +285,11 @@ impl Lexer {
                 s.push(ch);
                 self.advance();
             } else if ch == '.' && !is_float {
-                if self.input.get(self.pos + 1).is_some_and(|c| c.is_ascii_digit()) {
+                if self
+                    .input
+                    .get(self.pos + 1)
+                    .is_some_and(|c| c.is_ascii_digit())
+                {
                     is_float = true;
                     s.push(ch);
                     self.advance();
@@ -288,7 +325,10 @@ impl Lexer {
                     Some('t') => s.push('\t'),
                     Some('\\') => s.push('\\'),
                     Some(c) if c == quote => s.push(c),
-                    Some(c) => { s.push('\\'); s.push(c); }
+                    Some(c) => {
+                        s.push('\\');
+                        s.push(c);
+                    }
                     None => return Err("unterminated escape".into()),
                 },
                 Some(ch) => s.push(ch),
@@ -352,109 +392,127 @@ mod tests {
     #[test]
     fn test_simple_match() {
         let tokens = lex("MATCH (a:Person) RETURN a");
-        assert_eq!(tokens, vec![
-            Token::Match,
-            Token::LParen,
-            Token::Ident("a".into()),
-            Token::Colon,
-            Token::Ident("Person".into()),
-            Token::RParen,
-            Token::Return,
-            Token::Ident("a".into()),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Match,
+                Token::LParen,
+                Token::Ident("a".into()),
+                Token::Colon,
+                Token::Ident("Person".into()),
+                Token::RParen,
+                Token::Return,
+                Token::Ident("a".into()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_relationship_pattern() {
         let tokens = lex("(a)-[:KNOWS]->(b)");
-        assert_eq!(tokens, vec![
-            Token::LParen,
-            Token::Ident("a".into()),
-            Token::RParen,
-            Token::DashLBracket,
-            Token::Colon,
-            Token::Ident("KNOWS".into()),
-            Token::RBracketDash,
-            Token::Gt,
-            Token::LParen,
-            Token::Ident("b".into()),
-            Token::RParen,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::LParen,
+                Token::Ident("a".into()),
+                Token::RParen,
+                Token::DashLBracket,
+                Token::Colon,
+                Token::Ident("KNOWS".into()),
+                Token::RBracketDash,
+                Token::Gt,
+                Token::LParen,
+                Token::Ident("b".into()),
+                Token::RParen,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_incoming_relationship() {
         let tokens = lex("(a)<-[:KNOWS]-(b)");
-        assert_eq!(tokens, vec![
-            Token::LParen,
-            Token::Ident("a".into()),
-            Token::RParen,
-            Token::LtDash,
-            Token::LBracket,  // standalone [
-            Token::Colon,
-            Token::Ident("KNOWS".into()),
-            Token::RBracketDash,
-            Token::LParen,
-            Token::Ident("b".into()),
-            Token::RParen,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::LParen,
+                Token::Ident("a".into()),
+                Token::RParen,
+                Token::LtDash,
+                Token::LBracket, // standalone [
+                Token::Colon,
+                Token::Ident("KNOWS".into()),
+                Token::RBracketDash,
+                Token::LParen,
+                Token::Ident("b".into()),
+                Token::RParen,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_properties() {
         let tokens = lex("{name: 'Alice', age: 28}");
-        assert_eq!(tokens, vec![
-            Token::LBrace,
-            Token::Ident("name".into()),
-            Token::Colon,
-            Token::StringLit("Alice".into()),
-            Token::Comma,
-            Token::Ident("age".into()),
-            Token::Colon,
-            Token::Integer(28),
-            Token::RBrace,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::LBrace,
+                Token::Ident("name".into()),
+                Token::Colon,
+                Token::StringLit("Alice".into()),
+                Token::Comma,
+                Token::Ident("age".into()),
+                Token::Colon,
+                Token::Integer(28),
+                Token::RBrace,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_where_clause() {
         let tokens = lex("WHERE a.age > 25 AND a.name = 'Alice'");
-        assert_eq!(tokens, vec![
-            Token::Where,
-            Token::Ident("a".into()),
-            Token::Dot,
-            Token::Ident("age".into()),
-            Token::Gt,
-            Token::Integer(25),
-            Token::And,
-            Token::Ident("a".into()),
-            Token::Dot,
-            Token::Ident("name".into()),
-            Token::Eq,
-            Token::StringLit("Alice".into()),
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Where,
+                Token::Ident("a".into()),
+                Token::Dot,
+                Token::Ident("age".into()),
+                Token::Gt,
+                Token::Integer(25),
+                Token::And,
+                Token::Ident("a".into()),
+                Token::Dot,
+                Token::Ident("name".into()),
+                Token::Eq,
+                Token::StringLit("Alice".into()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
     fn test_variable_length_path() {
         let tokens = lex("-[:KNOWS*1..3]->");
-        assert_eq!(tokens, vec![
-            Token::DashLBracket,
-            Token::Colon,
-            Token::Ident("KNOWS".into()),
-            Token::Star,
-            Token::Integer(1),
-            Token::DotDot,
-            Token::Integer(3),
-            Token::RBracketDash,
-            Token::Gt,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::DashLBracket,
+                Token::Colon,
+                Token::Ident("KNOWS".into()),
+                Token::Star,
+                Token::Integer(1),
+                Token::DotDot,
+                Token::Integer(3),
+                Token::RBracketDash,
+                Token::Gt,
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -472,22 +530,18 @@ mod tests {
     #[test]
     fn test_comparison_operators() {
         let tokens = lex("<= >= <>");
-        assert_eq!(tokens, vec![
-            Token::Lte,
-            Token::Gte,
-            Token::Neq,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![Token::Lte, Token::Gte, Token::Neq, Token::Eof,]
+        );
     }
 
     #[test]
     fn test_case_insensitive_keywords() {
         let tokens = lex("match WHERE Return");
-        assert_eq!(tokens, vec![
-            Token::Match,
-            Token::Where,
-            Token::Return,
-            Token::Eof,
-        ]);
+        assert_eq!(
+            tokens,
+            vec![Token::Match, Token::Where, Token::Return, Token::Eof,]
+        );
     }
 }

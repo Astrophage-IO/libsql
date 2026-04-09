@@ -82,16 +82,22 @@ impl GraphStats {
         let mut pos = 0;
 
         let node_count = u64::from_le_bytes(
-            buf[pos..pos + 8].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+            buf[pos..pos + 8]
+                .try_into()
+                .map_err(|_| GraphError::CorruptPage(0))?,
         );
         pos += 8;
         let edge_count = u64::from_le_bytes(
-            buf[pos..pos + 8].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+            buf[pos..pos + 8]
+                .try_into()
+                .map_err(|_| GraphError::CorruptPage(0))?,
         );
         pos += 8;
 
         let label_len = u32::from_le_bytes(
-            buf[pos..pos + 4].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+            buf[pos..pos + 4]
+                .try_into()
+                .map_err(|_| GraphError::CorruptPage(0))?,
         ) as usize;
         pos += 4;
         if label_len > 10_000 {
@@ -103,11 +109,15 @@ impl GraphStats {
         let mut label_counts = HashMap::with_capacity(label_len);
         for _ in 0..label_len {
             let k = u32::from_le_bytes(
-                buf[pos..pos + 4].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+                buf[pos..pos + 4]
+                    .try_into()
+                    .map_err(|_| GraphError::CorruptPage(0))?,
             );
             pos += 4;
             let v = u64::from_le_bytes(
-                buf[pos..pos + 8].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+                buf[pos..pos + 8]
+                    .try_into()
+                    .map_err(|_| GraphError::CorruptPage(0))?,
             );
             pos += 8;
             label_counts.insert(k, v);
@@ -117,7 +127,9 @@ impl GraphStats {
             return Err(GraphError::CorruptPage(0));
         }
         let rel_len = u32::from_le_bytes(
-            buf[pos..pos + 4].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+            buf[pos..pos + 4]
+                .try_into()
+                .map_err(|_| GraphError::CorruptPage(0))?,
         ) as usize;
         pos += 4;
         if rel_len > 10_000 {
@@ -129,11 +141,15 @@ impl GraphStats {
         let mut rel_type_counts = HashMap::with_capacity(rel_len);
         for _ in 0..rel_len {
             let k = u32::from_le_bytes(
-                buf[pos..pos + 4].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+                buf[pos..pos + 4]
+                    .try_into()
+                    .map_err(|_| GraphError::CorruptPage(0))?,
             );
             pos += 4;
             let v = u64::from_le_bytes(
-                buf[pos..pos + 8].try_into().map_err(|_| GraphError::CorruptPage(0))?,
+                buf[pos..pos + 8]
+                    .try_into()
+                    .map_err(|_| GraphError::CorruptPage(0))?,
             );
             pos += 8;
             rel_type_counts.insert(k, v);

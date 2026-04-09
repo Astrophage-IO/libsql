@@ -44,7 +44,10 @@ impl Parser {
             Token::Delete | Token::Detach => self.parse_delete_stmt(),
             Token::Merge => self.parse_merge(),
             Token::Unwind => self.parse_unwind(),
-            _ => Err(format!("expected MATCH, CREATE, DELETE, or MERGE, got {:?}", self.peek())),
+            _ => Err(format!(
+                "expected MATCH, CREATE, DELETE, or MERGE, got {:?}",
+                self.peek()
+            )),
         }
     }
 
@@ -162,7 +165,9 @@ impl Parser {
             let node = self.parse_node_pattern()?;
 
             if *self.peek() == Token::Dash || *self.peek() == Token::DashLBracket {
-                let from_var = node.variable.ok_or("relationship source needs a variable")?;
+                let from_var = node
+                    .variable
+                    .ok_or("relationship source needs a variable")?;
                 let rel_pat = self.parse_rel_pattern()?;
                 self.expect(&Token::LParen)?;
                 let to_var = self.expect_ident()?;
@@ -394,7 +399,10 @@ impl Parser {
             self.advance();
             false
         } else {
-            return Err(format!("expected - or -[ in relationship, got {:?}", self.peek()));
+            return Err(format!(
+                "expected - or -[ in relationship, got {:?}",
+                self.peek()
+            ));
         };
 
         let mut variable = None;
@@ -558,15 +566,25 @@ impl Parser {
             }
             Token::StartsWith => {
                 self.advance();
-                self.expect(&Token::With).map_err(|_| "expected WITH after STARTS".to_string())?;
+                self.expect(&Token::With)
+                    .map_err(|_| "expected WITH after STARTS".to_string())?;
                 let right = self.parse_addition()?;
-                return Ok(Expr::BinaryOp(Box::new(left), BinOp::StartsWith, Box::new(right)));
+                return Ok(Expr::BinaryOp(
+                    Box::new(left),
+                    BinOp::StartsWith,
+                    Box::new(right),
+                ));
             }
             Token::EndsWith => {
                 self.advance();
-                self.expect(&Token::With).map_err(|_| "expected WITH after ENDS".to_string())?;
+                self.expect(&Token::With)
+                    .map_err(|_| "expected WITH after ENDS".to_string())?;
                 let right = self.parse_addition()?;
-                return Ok(Expr::BinaryOp(Box::new(left), BinOp::EndsWith, Box::new(right)));
+                return Ok(Expr::BinaryOp(
+                    Box::new(left),
+                    BinOp::EndsWith,
+                    Box::new(right),
+                ));
             }
             _ => return Ok(left),
         };
@@ -630,9 +648,18 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Literal(Literal::String(s)))
             }
-            Token::True => { self.advance(); Ok(Expr::Literal(Literal::Bool(true))) }
-            Token::False => { self.advance(); Ok(Expr::Literal(Literal::Bool(false))) }
-            Token::Null => { self.advance(); Ok(Expr::Literal(Literal::Null)) }
+            Token::True => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Bool(true)))
+            }
+            Token::False => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Bool(false)))
+            }
+            Token::Null => {
+                self.advance();
+                Ok(Expr::Literal(Literal::Null))
+            }
             Token::Parameter(name) => {
                 let name = name.clone();
                 self.advance();
@@ -823,9 +850,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_with_relationship() {
-        let stmt = parse(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name",
-        ).unwrap();
+        let stmt = parse("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name").unwrap();
         match stmt {
             Statement::Match(m) => {
                 assert_eq!(m.pattern.elements.len(), 3);
@@ -842,9 +867,8 @@ mod tests {
 
     #[test]
     fn test_parse_match_with_where() {
-        let stmt = parse(
-            "MATCH (a:Person) WHERE a.age > 25 AND a.name = 'Alice' RETURN a",
-        ).unwrap();
+        let stmt =
+            parse("MATCH (a:Person) WHERE a.age > 25 AND a.name = 'Alice' RETURN a").unwrap();
         match stmt {
             Statement::Match(m) => {
                 assert!(m.where_clause.is_some());
@@ -859,9 +883,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_with_order_limit() {
-        let stmt = parse(
-            "MATCH (a:Person) RETURN a.name ORDER BY a.age DESC LIMIT 10",
-        ).unwrap();
+        let stmt = parse("MATCH (a:Person) RETURN a.name ORDER BY a.age DESC LIMIT 10").unwrap();
         match stmt {
             Statement::Match(m) => {
                 let ret = m.return_clause.unwrap();
@@ -928,9 +950,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_set() {
-        let stmt = parse(
-            "MATCH (n:Person {name: 'Alice'}) SET n.age = 29 RETURN n",
-        ).unwrap();
+        let stmt = parse("MATCH (n:Person {name: 'Alice'}) SET n.age = 29 RETURN n").unwrap();
         match stmt {
             Statement::Match(m) => {
                 assert_eq!(m.set_clauses.len(), 1);
@@ -943,9 +963,7 @@ mod tests {
 
     #[test]
     fn test_parse_match_detach_delete() {
-        let stmt = parse(
-            "MATCH (n:Person {name: 'Alice'}) DETACH DELETE n",
-        ).unwrap();
+        let stmt = parse("MATCH (n:Person {name: 'Alice'}) DETACH DELETE n").unwrap();
         match stmt {
             Statement::Match(m) => {
                 let del = m.delete.unwrap();
@@ -986,9 +1004,7 @@ mod tests {
 
     #[test]
     fn test_parse_variable_length_path() {
-        let stmt = parse(
-            "MATCH (a)-[:KNOWS*1..3]->(b) RETURN b",
-        ).unwrap();
+        let stmt = parse("MATCH (a)-[:KNOWS*1..3]->(b) RETURN b").unwrap();
         match stmt {
             Statement::Match(m) => {
                 if let PatternElement::Relationship(r) = &m.pattern.elements[1] {
@@ -1053,9 +1069,9 @@ mod tests {
 
     #[test]
     fn test_parse_complex_where() {
-        let stmt = parse(
-            "MATCH (a:Person) WHERE (a.age >= 18 AND a.age < 65) OR a.vip = true RETURN a",
-        ).unwrap();
+        let stmt =
+            parse("MATCH (a:Person) WHERE (a.age >= 18 AND a.age < 65) OR a.vip = true RETURN a")
+                .unwrap();
         match stmt {
             Statement::Match(m) => {
                 assert!(m.where_clause.is_some());

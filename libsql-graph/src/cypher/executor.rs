@@ -32,7 +32,9 @@ impl std::fmt::Display for Value {
             Self::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{item}")?;
                 }
                 write!(f, "]")
@@ -160,7 +162,11 @@ pub fn execute<P: Pager>(
                 max_hops,
                 optional,
             } => {
-                let prev = if *optional { Some(binding_table.clone()) } else { None };
+                let prev = if *optional {
+                    Some(binding_table.clone())
+                } else {
+                    None
+                };
                 if min_hops.is_some() || max_hops.is_some() {
                     binding_table = exec_var_length_expand(
                         engine,
@@ -186,9 +192,9 @@ pub fn execute<P: Pager>(
                 if *optional {
                     if let Some(prev_table) = prev {
                         for prev_row in &prev_table {
-                            let has_match = binding_table.iter().any(|b| {
-                                prev_row.iter().all(|(k, v)| b.get(k) == Some(v))
-                            });
+                            let has_match = binding_table
+                                .iter()
+                                .any(|b| prev_row.iter().all(|(k, v)| b.get(k) == Some(v)));
                             if !has_match {
                                 let mut null_row = prev_row.clone();
                                 if !to_var.is_empty() {
@@ -213,8 +219,14 @@ pub fn execute<P: Pager>(
                 label,
                 properties,
             } => {
-                binding_table =
-                    exec_create_node(engine, &binding_table, variable, label, properties, &mut stats)?;
+                binding_table = exec_create_node(
+                    engine,
+                    &binding_table,
+                    variable,
+                    label,
+                    properties,
+                    &mut stats,
+                )?;
             }
             PlanStep::CreateRelationship {
                 from_var,
@@ -222,14 +234,30 @@ pub fn execute<P: Pager>(
                 to_var,
                 properties,
             } => {
-                exec_create_rel(engine, &binding_table, from_var, rel_type, to_var, properties, &mut stats)?;
+                exec_create_rel(
+                    engine,
+                    &binding_table,
+                    from_var,
+                    rel_type,
+                    to_var,
+                    properties,
+                    &mut stats,
+                )?;
             }
             PlanStep::SetProperty {
                 variable,
                 property,
                 value,
             } => {
-                exec_set_property(engine, &binding_table, variable, property, value, params, &mut stats)?;
+                exec_set_property(
+                    engine,
+                    &binding_table,
+                    variable,
+                    property,
+                    value,
+                    params,
+                    &mut stats,
+                )?;
             }
             PlanStep::DeleteNode { variable, detach } => {
                 exec_delete(engine, &binding_table, variable, *detach, &mut stats)?;
@@ -296,7 +324,10 @@ pub fn execute<P: Pager>(
                 }
             }
             PlanStep::Distinct => {}
-            PlanStep::With { items, where_clause } => {
+            PlanStep::With {
+                items,
+                where_clause,
+            } => {
                 let mut new_table = Vec::new();
                 for bindings in &binding_table {
                     let mut new_bindings = HashMap::new();
@@ -355,9 +386,7 @@ pub fn execute<P: Pager>(
     if let Some(items) = project_items {
         columns = items
             .iter()
-            .map(|item| {
-                item.alias.clone().unwrap_or_else(|| expr_name(&item.expr))
-            })
+            .map(|item| item.alias.clone().unwrap_or_else(|| expr_name(&item.expr)))
             .collect();
 
         let has_aggregates = items.iter().any(|item| is_aggregate_expr(&item.expr));
@@ -442,8 +471,8 @@ fn exec_node_scan<P: Pager>(
     properties: &[(String, Literal)],
 ) -> Result<Vec<Bindings>, GraphError> {
     let has_existing_bindings = current.iter().any(|b| !b.is_empty());
-    let var_already_bound = !variable.is_empty()
-        && current.iter().any(|b| b.contains_key(variable));
+    let var_already_bound =
+        !variable.is_empty() && current.iter().any(|b| b.contains_key(variable));
 
     if var_already_bound {
         return Ok(current.to_vec());
@@ -524,14 +553,15 @@ fn exec_indexed_node_scan<P: Pager>(
     properties: &[(String, Literal)],
 ) -> Result<Vec<Bindings>, GraphError> {
     let has_existing_bindings = current.iter().any(|b| !b.is_empty());
-    let var_already_bound = !variable.is_empty()
-        && current.iter().any(|b| b.contains_key(variable));
+    let var_already_bound =
+        !variable.is_empty() && current.iter().any(|b| b.contains_key(variable));
 
     if var_already_bound {
         return Ok(current.to_vec());
     }
 
-    let label_index = crate::storage::label_index::LabelIndex::new(engine.db().page_size() as usize);
+    let label_index =
+        crate::storage::label_index::LabelIndex::new(engine.db().page_size() as usize);
     let max_node_id = engine.db().header().next_node_id;
     let node_ids = label_index.scan(engine.db().pager(), index_root, max_node_id)?;
 
@@ -925,7 +955,7 @@ fn eval_expr<P: Pager>(
                 .map(|pv| Value::from_property(&pv))
                 .unwrap_or(Value::Null),
             _ => Value::Null,
-        }
+        },
         Expr::FunctionCall(name, args) => {
             match name.to_lowercase().as_str() {
                 "tostring" | "tostr" => {
@@ -937,7 +967,9 @@ fn eval_expr<P: Pager>(
                     match val {
                         Value::Integer(_) => val,
                         Value::Float(f) => Value::Integer(f as i64),
-                        Value::String(s) => s.parse::<i64>().map(Value::Integer).unwrap_or(Value::Null),
+                        Value::String(s) => {
+                            s.parse::<i64>().map(Value::Integer).unwrap_or(Value::Null)
+                        }
                         Value::Bool(b) => Value::Integer(b as i64),
                         _ => Value::Null,
                     }
@@ -947,7 +979,9 @@ fn eval_expr<P: Pager>(
                     match val {
                         Value::Float(_) => val,
                         Value::Integer(n) => Value::Float(n as f64),
-                        Value::String(s) => s.parse::<f64>().map(Value::Float).unwrap_or(Value::Null),
+                        Value::String(s) => {
+                            s.parse::<f64>().map(Value::Float).unwrap_or(Value::Null)
+                        }
                         _ => Value::Null,
                     }
                 }
@@ -988,9 +1022,11 @@ fn eval_expr<P: Pager>(
                 "labels" => {
                     let val = eval_expr(engine, &args[0], bindings, params);
                     if let Value::Node(id) = val {
-                        let label_name = engine.get_node(id).ok().map(|n| {
-                            engine.get_label_name(n.label_token_id).unwrap_or_default()
-                        }).unwrap_or_default();
+                        let label_name = engine
+                            .get_node(id)
+                            .ok()
+                            .map(|n| engine.get_label_name(n.label_token_id).unwrap_or_default())
+                            .unwrap_or_default();
                         Value::List(vec![Value::String(label_name)])
                     } else {
                         Value::Null
@@ -1050,7 +1086,9 @@ fn eval_expr<P: Pager>(
                                 _ => 0,
                             };
                             let end_idx = match len {
-                                Some(Value::Integer(n)) => (start_idx + n.max(0) as usize).min(s.len()),
+                                Some(Value::Integer(n)) => {
+                                    (start_idx + n.max(0) as usize).min(s.len())
+                                }
                                 _ => s.len(),
                             };
                             if start_idx <= s.len() {
@@ -1082,9 +1120,9 @@ fn eval_expr<P: Pager>(
                         let val = eval_expr(engine, &args[0], bindings, params);
                         let delim = eval_expr(engine, &args[1], bindings, params);
                         match (val, delim) {
-                            (Value::String(s), Value::String(d)) => {
-                                Value::List(s.split(&d).map(|p| Value::String(p.to_string())).collect())
-                            }
+                            (Value::String(s), Value::String(d)) => Value::List(
+                                s.split(&d).map(|p| Value::String(p.to_string())).collect(),
+                            ),
                             _ => Value::Null,
                         }
                     } else {
@@ -1117,7 +1155,9 @@ fn eval_expr<P: Pager>(
                     let val = eval_expr(engine, &args[0], bindings, params);
                     match val {
                         Value::List(mut l) => {
-                            if !l.is_empty() { l.remove(0); }
+                            if !l.is_empty() {
+                                l.remove(0);
+                            }
                             Value::List(l)
                         }
                         _ => Value::Null,
@@ -1126,7 +1166,8 @@ fn eval_expr<P: Pager>(
                 "range" => {
                     let start = eval_expr(engine, &args[0], bindings, params);
                     let end = eval_expr(engine, &args[1], bindings, params);
-                    let step = args.get(2)
+                    let step = args
+                        .get(2)
                         .map(|e| eval_expr(engine, e, bindings, params))
                         .unwrap_or(Value::Integer(1));
                     match (start, end, step) {
@@ -1183,7 +1224,9 @@ fn eval_expr<P: Pager>(
                         engine
                             .get_all_node_properties(id)
                             .map(|props| {
-                                Value::List(props.into_iter().map(|(k, _)| Value::String(k)).collect())
+                                Value::List(
+                                    props.into_iter().map(|(k, _)| Value::String(k)).collect(),
+                                )
                             })
                             .unwrap_or(Value::Null)
                     } else {
@@ -1199,7 +1242,9 @@ fn eval_expr<P: Pager>(
                                 Value::List(
                                     props
                                         .into_iter()
-                                        .flat_map(|(k, v)| vec![Value::String(k), Value::from_property(&v)])
+                                        .flat_map(|(k, v)| {
+                                            vec![Value::String(k), Value::from_property(&v)]
+                                        })
                                         .collect(),
                                 )
                             })
@@ -1307,8 +1352,12 @@ fn eval_binop(left: &Value, op: BinOp, right: &Value) -> Value {
 fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Integer(x), Value::Integer(y)) => x.cmp(y),
-        (Value::Integer(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
-        (Value::Float(x), Value::Integer(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Integer(x), Value::Float(y)) => (*x as f64)
+            .partial_cmp(y)
+            .unwrap_or(std::cmp::Ordering::Equal),
+        (Value::Float(x), Value::Integer(y)) => x
+            .partial_cmp(&(*y as f64))
+            .unwrap_or(std::cmp::Ordering::Equal),
         (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal),
         (Value::String(x), Value::String(y)) => x.cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
@@ -1390,12 +1439,7 @@ fn exec_merge<P: Pager>(
     if let Some(id) = found_id {
         node_id = id;
         for set_clause in on_match_set {
-            let val = eval_expr(
-                engine,
-                &set_clause.value,
-                &HashMap::new(),
-                params,
-            );
+            let val = eval_expr(engine, &set_clause.value, &HashMap::new(), params);
             engine.set_node_property(node_id, &set_clause.property, val.to_property())?;
             stats.properties_set += 1;
         }
@@ -1408,12 +1452,7 @@ fn exec_merge<P: Pager>(
             stats.properties_set += 1;
         }
         for set_clause in on_create_set {
-            let val = eval_expr(
-                engine,
-                &set_clause.value,
-                &HashMap::new(),
-                params,
-            );
+            let val = eval_expr(engine, &set_clause.value, &HashMap::new(), params);
             engine.set_node_property(node_id, &set_clause.property, val.to_property())?;
             stats.properties_set += 1;
         }
@@ -1593,39 +1632,57 @@ fn aggregate_values(expr: &Expr, vals: &[Value]) -> Value {
             let mut ftotal = 0.0f64;
             for v in vals {
                 match v {
-                    Value::Integer(n) => { total += n; ftotal += *n as f64; }
-                    Value::Float(f) => { is_float = true; ftotal += f; }
+                    Value::Integer(n) => {
+                        total += n;
+                        ftotal += *n as f64;
+                    }
+                    Value::Float(f) => {
+                        is_float = true;
+                        ftotal += f;
+                    }
                     _ => {}
                 }
             }
-            if is_float { Value::Float(ftotal) } else { Value::Integer(total) }
+            if is_float {
+                Value::Float(ftotal)
+            } else {
+                Value::Integer(total)
+            }
         }
         "avg" => {
             let mut sum = 0.0f64;
             let mut count = 0u64;
             for v in vals {
                 match v {
-                    Value::Integer(n) => { sum += *n as f64; count += 1; }
-                    Value::Float(f) => { sum += f; count += 1; }
+                    Value::Integer(n) => {
+                        sum += *n as f64;
+                        count += 1;
+                    }
+                    Value::Float(f) => {
+                        sum += f;
+                        count += 1;
+                    }
                     _ => {}
                 }
             }
-            if count == 0 { Value::Null } else { Value::Float(sum / count as f64) }
+            if count == 0 {
+                Value::Null
+            } else {
+                Value::Float(sum / count as f64)
+            }
         }
-        "min" => {
-            vals.iter()
-                .filter(|v| **v != Value::Null)
-                .min_by(|a, b| compare_values(a, b))
-                .cloned()
-                .unwrap_or(Value::Null)
-        }
-        "max" => {
-            vals.iter()
-                .filter(|v| **v != Value::Null)
-                .max_by(|a, b| compare_values(a, b))
-                .cloned()
-                .unwrap_or(Value::Null)
-        }
+        "min" => vals
+            .iter()
+            .filter(|v| **v != Value::Null)
+            .min_by(|a, b| compare_values(a, b))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "max" => vals
+            .iter()
+            .filter(|v| **v != Value::Null)
+            .max_by(|a, b| compare_values(a, b))
+            .cloned()
+            .unwrap_or(Value::Null),
         "collect" => Value::List(vals.to_vec()),
         _ => Value::Null,
     }
@@ -1651,12 +1708,28 @@ mod tests {
         let bob = engine.create_node("Person").unwrap();
         let charlie = engine.create_node("Person").unwrap();
 
-        engine.set_node_property(alice, "name", PropertyValue::ShortString("Alice".into())).unwrap();
-        engine.set_node_property(alice, "age", PropertyValue::Int32(30)).unwrap();
-        engine.set_node_property(bob, "name", PropertyValue::ShortString("Bob".into())).unwrap();
-        engine.set_node_property(bob, "age", PropertyValue::Int32(25)).unwrap();
-        engine.set_node_property(charlie, "name", PropertyValue::ShortString("Charlie".into())).unwrap();
-        engine.set_node_property(charlie, "age", PropertyValue::Int32(35)).unwrap();
+        engine
+            .set_node_property(alice, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+        engine
+            .set_node_property(alice, "age", PropertyValue::Int32(30))
+            .unwrap();
+        engine
+            .set_node_property(bob, "name", PropertyValue::ShortString("Bob".into()))
+            .unwrap();
+        engine
+            .set_node_property(bob, "age", PropertyValue::Int32(25))
+            .unwrap();
+        engine
+            .set_node_property(
+                charlie,
+                "name",
+                PropertyValue::ShortString("Charlie".into()),
+            )
+            .unwrap();
+        engine
+            .set_node_property(charlie, "age", PropertyValue::Int32(35))
+            .unwrap();
 
         engine.create_relationship(alice, bob, "KNOWS").unwrap();
         engine.create_relationship(alice, charlie, "KNOWS").unwrap();
@@ -1734,10 +1807,7 @@ mod tests {
     fn test_create_node_via_cypher() {
         let path = temp_path();
         let mut engine = GraphEngine::create(&path, 4096).unwrap();
-        let result = run_query(
-            &mut engine,
-            "CREATE (n:Person {name: 'Dave', age: 40})",
-        );
+        let result = run_query(&mut engine, "CREATE (n:Person {name: 'Dave', age: 40})");
         assert_eq!(result.stats.nodes_created, 1);
         assert_eq!(result.stats.properties_set, 2);
         assert_eq!(engine.node_count(), 1);
@@ -1865,10 +1935,7 @@ mod tests {
     fn test_sum_aggregate() {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
-        let result = run_query(
-            &mut engine,
-            "MATCH (a:Person) RETURN sum(a.age)",
-        );
+        let result = run_query(&mut engine, "MATCH (a:Person) RETURN sum(a.age)");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Integer(90)); // 30 + 25 + 35
 
@@ -1880,10 +1947,7 @@ mod tests {
     fn test_avg_aggregate() {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
-        let result = run_query(
-            &mut engine,
-            "MATCH (a:Person) RETURN avg(a.age)",
-        );
+        let result = run_query(&mut engine, "MATCH (a:Person) RETURN avg(a.age)");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Float(30.0)); // (30+25+35)/3
 
@@ -1911,10 +1975,7 @@ mod tests {
     fn test_collect_aggregate() {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
-        let result = run_query(
-            &mut engine,
-            "MATCH (a:Person) RETURN collect(a.name)",
-        );
+        let result = run_query(&mut engine, "MATCH (a:Person) RETURN collect(a.name)");
         assert_eq!(result.rows.len(), 1);
         if let Value::List(items) = &result.rows[0][0] {
             assert_eq!(items.len(), 3);
@@ -1933,7 +1994,9 @@ mod tests {
     fn test_query_convenience_method() {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
-        let result = engine.query("MATCH (a:Person) RETURN a.name LIMIT 2").unwrap();
+        let result = engine
+            .query("MATCH (a:Person) RETURN a.name LIMIT 2")
+            .unwrap();
         assert_eq!(result.rows.len(), 2);
 
         drop(engine);
@@ -2289,10 +2352,7 @@ mod tests {
     fn test_rel_id_function() {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
-        let result = run_query(
-            &mut engine,
-            "MATCH (a:Person)-[r:KNOWS]->(b) RETURN id(r)",
-        );
+        let result = run_query(&mut engine, "MATCH (a:Person)-[r:KNOWS]->(b) RETURN id(r)");
         assert_eq!(result.rows.len(), 2);
         for row in &result.rows {
             assert!(matches!(row[0], Value::Integer(_)));
@@ -2427,10 +2487,7 @@ mod tests {
     fn test_skip_all() {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
-        let result = run_query(
-            &mut engine,
-            "MATCH (a:Person) RETURN a.name SKIP 100",
-        );
+        let result = run_query(&mut engine, "MATCH (a:Person) RETURN a.name SKIP 100");
         assert_eq!(result.rows.len(), 0);
 
         drop(engine);
@@ -2509,10 +2566,7 @@ mod tests {
             .set_node_property(0, "name", PropertyValue::ShortString(long_name.clone()))
             .unwrap();
 
-        let result = run_query(
-            &mut engine,
-            "MATCH (a:Person) RETURN a.name",
-        );
+        let result = run_query(&mut engine, "MATCH (a:Person) RETURN a.name");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::String(long_name));
 
@@ -2525,16 +2579,28 @@ mod tests {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN toLower(a.name)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN toLower(a.name)",
+        );
         assert_eq!(result.rows[0][0], Value::String("alice".into()));
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN toUpper(a.name)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN toUpper(a.name)",
+        );
         assert_eq!(result.rows[0][0], Value::String("ALICE".into()));
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN size(a.name)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN size(a.name)",
+        );
         assert_eq!(result.rows[0][0], Value::Integer(5));
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN substring(a.name, 0, 3)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN substring(a.name, 0, 3)",
+        );
         assert_eq!(result.rows[0][0], Value::String("Ali".into()));
 
         drop(engine);
@@ -2549,7 +2615,9 @@ mod tests {
         let result = engine.query("UNWIND [1, 2, 3] AS x RETURN x").unwrap();
         assert_eq!(result.rows.len(), 3);
 
-        let result = engine.query("MATCH (a:Person) RETURN coalesce(a.email, 'none')").unwrap();
+        let result = engine
+            .query("MATCH (a:Person) RETURN coalesce(a.email, 'none')")
+            .unwrap();
         assert_eq!(result.rows.len(), 0);
 
         drop(engine);
@@ -2561,16 +2629,28 @@ mod tests {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN abs(-5)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN abs(-5)",
+        );
         assert_eq!(result.rows[0][0], Value::Integer(5));
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN round(3.7)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN round(3.7)",
+        );
         assert_eq!(result.rows[0][0], Value::Float(4.0));
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN ceil(3.2)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN ceil(3.2)",
+        );
         assert_eq!(result.rows[0][0], Value::Float(4.0));
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN floor(3.9)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN floor(3.9)",
+        );
         assert_eq!(result.rows[0][0], Value::Float(3.0));
 
         drop(engine);
@@ -2582,7 +2662,10 @@ mod tests {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
 
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN coalesce(a.email, a.name)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN coalesce(a.email, a.name)",
+        );
         assert_eq!(result.rows[0][0], Value::String("Alice".into()));
 
         drop(engine);
@@ -2593,7 +2676,10 @@ mod tests {
     fn test_keys_function() {
         let path = temp_path();
         let mut engine = setup_social_graph(&path);
-        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN keys(a)");
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN keys(a)",
+        );
         assert_eq!(result.rows.len(), 1);
         if let Value::List(keys) = &result.rows[0][0] {
             assert!(keys.contains(&Value::String("name".into())));

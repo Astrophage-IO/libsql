@@ -1,9 +1,7 @@
 use crate::error::GraphError;
 use crate::storage::page::{PageHeader, PageType, PAGE_HEADER_SIZE};
 use crate::storage::pager::Pager;
-use crate::storage::record::{
-    records_per_page, RecordAddress,
-};
+use crate::storage::record::{records_per_page, RecordAddress};
 
 pub const REL_GROUP_RECORD_SIZE: usize = 64;
 pub const REL_GROUP_FLAG_IN_USE: u8 = 0b1000_0000;
@@ -134,7 +132,9 @@ impl RelGroupStore {
         let page = pager.get_page(addr.page)?;
         let data = page.data();
         let offset = PAGE_HEADER_SIZE + addr.slot as usize * REL_GROUP_RECORD_SIZE;
-        Ok(RelGroupRecord::read(&data[offset..offset + REL_GROUP_RECORD_SIZE]))
+        Ok(RelGroupRecord::read(
+            &data[offset..offset + REL_GROUP_RECORD_SIZE],
+        ))
     }
 
     pub fn write_group(
@@ -309,21 +309,15 @@ mod tests {
         let g1 = RelGroupRecord::new(10);
         let first = store.create_group(&mut pager, &g1).unwrap();
 
-        let (addr, _, created) = store
-            .find_or_create_group(&mut pager, first, 10)
-            .unwrap();
+        let (addr, _, created) = store.find_or_create_group(&mut pager, first, 10).unwrap();
         assert!(!created);
         assert_eq!(addr, first);
 
-        let (addr2, _, created2) = store
-            .find_or_create_group(&mut pager, first, 20)
-            .unwrap();
+        let (addr2, _, created2) = store.find_or_create_group(&mut pager, first, 20).unwrap();
         assert!(created2);
         assert_ne!(addr2, first);
 
-        let (addr3, _, created3) = store
-            .find_or_create_group(&mut pager, first, 20)
-            .unwrap();
+        let (addr3, _, created3) = store.find_or_create_group(&mut pager, first, 20).unwrap();
         assert!(!created3);
         assert_eq!(addr3, addr2);
 
