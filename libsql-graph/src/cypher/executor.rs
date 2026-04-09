@@ -880,6 +880,218 @@ fn eval_expr(
                         Value::Null
                     }
                 }
+                "size" | "length" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::String(s) => Value::Integer(s.len() as i64),
+                        Value::List(l) => Value::Integer(l.len() as i64),
+                        _ => Value::Null,
+                    }
+                }
+                "tolower" | "tolowercase" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::String(s) => Value::String(s.to_lowercase()),
+                        _ => Value::Null,
+                    }
+                }
+                "toupper" | "touppercase" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::String(s) => Value::String(s.to_uppercase()),
+                        _ => Value::Null,
+                    }
+                }
+                "trim" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::String(s) => Value::String(s.trim().to_string()),
+                        _ => Value::Null,
+                    }
+                }
+                "ltrim" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::String(s) => Value::String(s.trim_start().to_string()),
+                        _ => Value::Null,
+                    }
+                }
+                "rtrim" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::String(s) => Value::String(s.trim_end().to_string()),
+                        _ => Value::Null,
+                    }
+                }
+                "substring" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    let start = args.get(1).map(|e| eval_expr(engine, e, bindings, params));
+                    let len = args.get(2).map(|e| eval_expr(engine, e, bindings, params));
+                    match val {
+                        Value::String(s) => {
+                            let start_idx = match start {
+                                Some(Value::Integer(n)) => n.max(0) as usize,
+                                _ => 0,
+                            };
+                            let end_idx = match len {
+                                Some(Value::Integer(n)) => (start_idx + n.max(0) as usize).min(s.len()),
+                                _ => s.len(),
+                            };
+                            if start_idx <= s.len() {
+                                Value::String(s[start_idx..end_idx].to_string())
+                            } else {
+                                Value::String(String::new())
+                            }
+                        }
+                        _ => Value::Null,
+                    }
+                }
+                "replace" => {
+                    if args.len() >= 3 {
+                        let val = eval_expr(engine, &args[0], bindings, params);
+                        let from = eval_expr(engine, &args[1], bindings, params);
+                        let to = eval_expr(engine, &args[2], bindings, params);
+                        match (val, from, to) {
+                            (Value::String(s), Value::String(f), Value::String(t)) => {
+                                Value::String(s.replace(&f, &t))
+                            }
+                            _ => Value::Null,
+                        }
+                    } else {
+                        Value::Null
+                    }
+                }
+                "split" => {
+                    if args.len() >= 2 {
+                        let val = eval_expr(engine, &args[0], bindings, params);
+                        let delim = eval_expr(engine, &args[1], bindings, params);
+                        match (val, delim) {
+                            (Value::String(s), Value::String(d)) => {
+                                Value::List(s.split(&d).map(|p| Value::String(p.to_string())).collect())
+                            }
+                            _ => Value::Null,
+                        }
+                    } else {
+                        Value::Null
+                    }
+                }
+                "reverse" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::String(s) => Value::String(s.chars().rev().collect()),
+                        Value::List(l) => Value::List(l.into_iter().rev().collect()),
+                        _ => Value::Null,
+                    }
+                }
+                "head" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::List(l) => l.into_iter().next().unwrap_or(Value::Null),
+                        _ => Value::Null,
+                    }
+                }
+                "last" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::List(l) => l.into_iter().last().unwrap_or(Value::Null),
+                        _ => Value::Null,
+                    }
+                }
+                "tail" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::List(mut l) => {
+                            if !l.is_empty() { l.remove(0); }
+                            Value::List(l)
+                        }
+                        _ => Value::Null,
+                    }
+                }
+                "range" => {
+                    let start = eval_expr(engine, &args[0], bindings, params);
+                    let end = eval_expr(engine, &args[1], bindings, params);
+                    let step = args.get(2)
+                        .map(|e| eval_expr(engine, e, bindings, params))
+                        .unwrap_or(Value::Integer(1));
+                    match (start, end, step) {
+                        (Value::Integer(s), Value::Integer(e), Value::Integer(st)) if st > 0 => {
+                            Value::List((s..=e).step_by(st as usize).map(Value::Integer).collect())
+                        }
+                        _ => Value::Null,
+                    }
+                }
+                "abs" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::Integer(n) => Value::Integer(n.abs()),
+                        Value::Float(f) => Value::Float(f.abs()),
+                        _ => Value::Null,
+                    }
+                }
+                "ceil" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::Float(f) => Value::Float(f.ceil()),
+                        Value::Integer(_) => val,
+                        _ => Value::Null,
+                    }
+                }
+                "floor" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::Float(f) => Value::Float(f.floor()),
+                        Value::Integer(_) => val,
+                        _ => Value::Null,
+                    }
+                }
+                "round" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    match val {
+                        Value::Float(f) => Value::Float(f.round()),
+                        Value::Integer(_) => val,
+                        _ => Value::Null,
+                    }
+                }
+                "coalesce" => {
+                    for arg in args {
+                        let val = eval_expr(engine, arg, bindings, params);
+                        if val != Value::Null {
+                            return val;
+                        }
+                    }
+                    Value::Null
+                }
+                "keys" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    if let Value::Node(id) = val {
+                        engine
+                            .get_all_node_properties(id)
+                            .map(|props| {
+                                Value::List(props.into_iter().map(|(k, _)| Value::String(k)).collect())
+                            })
+                            .unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                }
+                "properties" => {
+                    let val = eval_expr(engine, &args[0], bindings, params);
+                    if let Value::Node(id) = val {
+                        engine
+                            .get_all_node_properties(id)
+                            .map(|props| {
+                                Value::List(
+                                    props
+                                        .into_iter()
+                                        .flat_map(|(k, v)| vec![Value::String(k), Value::from_property(&v)])
+                                        .collect(),
+                                )
+                            })
+                            .unwrap_or(Value::Null)
+                    } else {
+                        Value::Null
+                    }
+                }
                 // Aggregates return placeholder when evaluated per-row;
                 // real aggregation happens in exec_aggregate
                 "count" | "sum" | "avg" | "min" | "max" | "collect" => {
@@ -2148,6 +2360,166 @@ mod tests {
         let result = run_query(&mut engine, "MATCH (a:Person) RETURN count(*)");
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0][0], Value::Integer(3));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_long_string_property() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        let node = engine.create_node("Person").unwrap();
+
+        let long_bio = "A".repeat(500);
+        engine
+            .set_node_property(node, "bio", PropertyValue::ShortString(long_bio.clone()))
+            .unwrap();
+
+        let result = engine.get_node_property(node, "bio").unwrap();
+        assert_eq!(result, Some(PropertyValue::ShortString(long_bio)));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_long_string_via_cypher() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.create_node("Person").unwrap();
+        let long_name = "A".repeat(100);
+        engine
+            .set_node_property(0, "name", PropertyValue::ShortString(long_name.clone()))
+            .unwrap();
+
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) RETURN a.name",
+        );
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String(long_name));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_string_functions() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN toLower(a.name)");
+        assert_eq!(result.rows[0][0], Value::String("alice".into()));
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN toUpper(a.name)");
+        assert_eq!(result.rows[0][0], Value::String("ALICE".into()));
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN size(a.name)");
+        assert_eq!(result.rows[0][0], Value::Integer(5));
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN substring(a.name, 0, 3)");
+        assert_eq!(result.rows[0][0], Value::String("Ali".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_list_functions() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let result = engine.query("UNWIND [1, 2, 3] AS x RETURN x").unwrap();
+        assert_eq!(result.rows.len(), 3);
+
+        let result = engine.query("MATCH (a:Person) RETURN coalesce(a.email, 'none')").unwrap();
+        assert_eq!(result.rows.len(), 0);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_math_functions() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN abs(-5)");
+        assert_eq!(result.rows[0][0], Value::Integer(5));
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN round(3.7)");
+        assert_eq!(result.rows[0][0], Value::Float(4.0));
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN ceil(3.2)");
+        assert_eq!(result.rows[0][0], Value::Float(4.0));
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN floor(3.9)");
+        assert_eq!(result.rows[0][0], Value::Float(3.0));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_coalesce() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN coalesce(a.email, a.name)");
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_keys_function() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(&mut engine, "MATCH (a:Person) WHERE a.name = 'Alice' RETURN keys(a)");
+        assert_eq!(result.rows.len(), 1);
+        if let Value::List(keys) = &result.rows[0][0] {
+            assert!(keys.contains(&Value::String("name".into())));
+            assert!(keys.contains(&Value::String("age".into())));
+        } else {
+            panic!("expected list");
+        }
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_replace_function() {
+        let path = temp_path();
+        let mut engine = setup_social_graph(&path);
+        let result = run_query(
+            &mut engine,
+            "MATCH (a:Person) WHERE a.name = 'Alice' RETURN replace(a.name, 'li', 'LI')",
+        );
+        assert_eq!(result.rows[0][0], Value::String("ALIce".into()));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_split_function() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.create_node("Data").unwrap();
+        engine
+            .set_node_property(0, "csv", PropertyValue::ShortString("a,b,c".into()))
+            .unwrap();
+
+        let result = run_query(&mut engine, "MATCH (d:Data) RETURN split(d.csv, ',')");
+        if let Value::List(parts) = &result.rows[0][0] {
+            assert_eq!(parts.len(), 3);
+            assert_eq!(parts[0], Value::String("a".into()));
+        } else {
+            panic!("expected list");
+        }
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

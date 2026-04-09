@@ -11,6 +11,7 @@ use crate::storage::property_store::{
 };
 use crate::storage::record::RecordAddress;
 use crate::storage::rel_store::{RelRecord, RelStore};
+use crate::storage::string_overflow::StringOverflowStore;
 use crate::storage::token_store::{
     TokenRecord, TokenStore, TOKEN_KIND_LABEL, TOKEN_KIND_REL_TYPE,
 };
@@ -21,6 +22,7 @@ pub struct GraphEngine {
     rel_store: RelStore,
     token_store: TokenStore,
     property_store: PropertyStore,
+    string_overflow: StringOverflowStore,
 }
 
 impl GraphEngine {
@@ -34,6 +36,7 @@ impl GraphEngine {
             rel_store: RelStore::new(h.rel_store_root, ps),
             token_store: TokenStore::new(h.token_store_root, ps),
             property_store: PropertyStore::new(h.prop_store_root, ps),
+            string_overflow: StringOverflowStore::new(ps),
             db,
         })
     }
@@ -48,6 +51,7 @@ impl GraphEngine {
             rel_store: RelStore::new(h.rel_store_root, ps),
             token_store: TokenStore::new(h.token_store_root, ps),
             property_store: PropertyStore::new(h.prop_store_root, ps),
+            string_overflow: StringOverflowStore::new(ps),
             db,
         })
     }
@@ -297,6 +301,32 @@ impl GraphEngine {
         Ok(id as u16)
     }
 
+    fn store_property_value(
+        &mut self,
+        value: PropertyValue,
+    ) -> Result<PropertyValue, GraphError> {
+        match &value {
+            PropertyValue::ShortString(s) if s.as_bytes().len() > crate::storage::property_store::PROP_VALUE_MAX_INLINE => {
+                let addr = self.string_overflow.write_string(self.db.pager(), s)?;
+                Ok(PropertyValue::Overflow(addr))
+            }
+            _ => Ok(value),
+        }
+    }
+
+    fn resolve_property_value(
+        &mut self,
+        value: PropertyValue,
+    ) -> Result<PropertyValue, GraphError> {
+        match value {
+            PropertyValue::Overflow(addr) => {
+                let s = self.string_overflow.read_string(self.db.pager(), addr)?;
+                Ok(PropertyValue::ShortString(s))
+            }
+            other => Ok(other),
+        }
+    }
+
     pub fn set_node_property(
         &mut self,
         node_id: u64,
@@ -304,6 +334,7 @@ impl GraphEngine {
         value: PropertyValue,
     ) -> Result<(), GraphError> {
         self.db.pager().begin_write()?;
+        let value = self.store_property_value(value)?;
         let key_id = self.get_or_create_prop_key(key)?;
         let mut node = self.node_store.read_node(self.db.pager(), node_id)?;
 
@@ -379,8 +410,12 @@ impl GraphEngine {
         if node.first_prop.is_null() {
             return Ok(None);
         }
-        self.property_store
-            .get_property(self.db.pager(), node.first_prop, key_id)
+        let raw = self.property_store
+            .get_property(self.db.pager(), node.first_prop, key_id)?;
+        match raw {
+            Some(val) => Ok(Some(self.resolve_property_value(val)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn get_all_node_properties(
@@ -400,7 +435,8 @@ impl GraphEngine {
             let token = self
                 .token_store
                 .read_token(self.db.pager(), key_id as u32)?;
-            result.push((token.name_str().to_string(), val));
+            let resolved = self.resolve_property_value(val)?;
+            result.push((token.name_str().to_string(), resolved));
         }
         Ok(result)
     }
@@ -409,9 +445,10 @@ impl GraphEngine {
         &mut self,
         rel_id: u64,
         key: &str,
-        value: PropertyValue,
+        value_raw: PropertyValue,
     ) -> Result<(), GraphError> {
         self.db.pager().begin_write()?;
+        let value = self.store_property_value(value_raw)?;
         let key_id = self.get_or_create_prop_key(key)?;
         let rel = self.rel_store.read_rel(self.db.pager(), rel_id)?;
 
@@ -488,8 +525,12 @@ impl GraphEngine {
         if rel.first_prop.is_null() {
             return Ok(None);
         }
-        self.property_store
-            .get_property(self.db.pager(), rel.first_prop, key_id)
+        let raw = self.property_store
+            .get_property(self.db.pager(), rel.first_prop, key_id)?;
+        match raw {
+            Some(val) => Ok(Some(self.resolve_property_value(val)?)),
+            None => Ok(None),
+        }
     }
 
     pub fn get_rel(&mut self, rel_id: u64) -> Result<RelRecord, GraphError> {

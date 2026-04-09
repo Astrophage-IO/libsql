@@ -499,7 +499,7 @@ impl Parser {
             Token::True => Ok(Literal::Bool(true)),
             Token::False => Ok(Literal::Bool(false)),
             Token::Null => Ok(Literal::Null),
-            Token::Minus => match self.advance() {
+            Token::Dash => match self.advance() {
                 Token::Integer(n) => Ok(Literal::Integer(-n)),
                 Token::Float(f) => Ok(Literal::Float(-f)),
                 tok => Err(format!("expected number after -, got {:?}", tok)),
@@ -587,7 +587,7 @@ impl Parser {
         loop {
             let op = match self.peek() {
                 Token::Plus => BinOp::Add,
-                Token::Minus => BinOp::Sub,
+                Token::Dash => BinOp::Sub,
                 _ => break,
             };
             self.advance();
@@ -614,7 +614,7 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, String> {
-        if *self.peek() == Token::Minus {
+        if *self.peek() == Token::Dash {
             self.advance();
             let expr = self.parse_primary()?;
             return Ok(Expr::UnaryOp(UnaryOp::Neg, Box::new(expr)));
