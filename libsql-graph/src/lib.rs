@@ -8,7 +8,7 @@ pub mod integrity;
 pub mod storage;
 
 pub use error::GraphError;
-pub use graph::{Direction, GraphEngine, GraphSchema, LabelInfo, RelTypeInfo};
+pub use graph::{Direction, GraphEngine, GraphSchema, LabelInfo, ProfileResult, RelTypeInfo, TransactionBatch};
 pub use cypher::executor::{QueryResult, QueryStats, Value};
 pub use storage::property_store::PropertyValue;
 pub use batch::{BatchNodeBuilder, BatchRelBuilder};

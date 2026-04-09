@@ -181,6 +181,12 @@ pub struct PropertyRecord {
     pub blocks: [PropertyBlock; PROP_MAX_BLOCKS],
 }
 
+impl Default for PropertyRecord {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PropertyRecord {
     pub fn new() -> Self {
         Self {

@@ -111,7 +111,7 @@ impl LabelIndex {
     ) -> Result<Vec<u64>, GraphError> {
         let mut results = Vec::new();
         let bpp = self.bits_per_page();
-        let max_pages = (max_node_id as usize + bpp - 1) / bpp;
+        let max_pages = (max_node_id as usize).div_ceil(bpp);
 
         for page_idx in 0..max_pages {
             let pgno = index_root + page_idx as u32;
@@ -150,7 +150,7 @@ impl LabelIndex {
     ) -> Result<u64, GraphError> {
         let mut total = 0u64;
         let bpp = self.bits_per_page();
-        let max_pages = (max_node_id as usize + bpp - 1) / bpp;
+        let max_pages = (max_node_id as usize).div_ceil(bpp);
 
         for page_idx in 0..max_pages {
             let pgno = index_root + page_idx as u32;

@@ -25,7 +25,7 @@ impl StringOverflowStore {
     ) -> Result<RecordAddress, GraphError> {
         let bytes = text.as_bytes();
         let cap = self.data_capacity();
-        let pages_needed = (bytes.len() + cap - 1) / cap;
+        let pages_needed = bytes.len().div_ceil(cap);
         let mut first_addr = RecordAddress::NULL;
         let mut prev_pgno: Option<u32> = None;
 

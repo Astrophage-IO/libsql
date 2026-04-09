@@ -191,6 +191,7 @@ impl GraphEngine {
 
         self.db.header_mut().edge_count += 1;
         self.flush_and_commit()?;
+
         Ok(rel_id)
     }
 
@@ -324,6 +325,31 @@ impl GraphEngine {
         executor::execute(self, &plan, &params)
     }
 
+    pub fn profile(&mut self, cypher: &str) -> Result<ProfileResult, GraphError> {
+        let start = std::time::Instant::now();
+        let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+        let parse_time = start.elapsed();
+
+        let plan_start = std::time::Instant::now();
+        let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+        let plan_time = plan_start.elapsed();
+
+        let plan_text = explain::explain(&plan);
+
+        let exec_start = std::time::Instant::now();
+        let result = executor::execute(self, &plan, &HashMap::new())?;
+        let exec_time = exec_start.elapsed();
+
+        Ok(ProfileResult {
+            result,
+            plan: plan_text,
+            parse_time_us: parse_time.as_micros() as u64,
+            plan_time_us: plan_time.as_micros() as u64,
+            exec_time_us: exec_time.as_micros() as u64,
+            total_time_us: start.elapsed().as_micros() as u64,
+        })
+    }
+
     pub fn explain(&self, cypher: &str) -> Result<String, GraphError> {
         let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
         let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
@@ -359,7 +385,7 @@ impl GraphEngine {
         value: PropertyValue,
     ) -> Result<PropertyValue, GraphError> {
         match &value {
-            PropertyValue::ShortString(s) if s.as_bytes().len() > crate::storage::property_store::PROP_VALUE_MAX_INLINE => {
+            PropertyValue::ShortString(s) if s.len() > crate::storage::property_store::PROP_VALUE_MAX_INLINE => {
                 let addr = self.string_overflow.write_string(self.db.pager(), s)?;
                 Ok(PropertyValue::Overflow(addr))
             }
@@ -742,7 +768,8 @@ impl GraphEngine {
         }
 
         let node_addr = self.node_store.address(node_id);
-        let mut type_chains: std::collections::HashMap<u32, (Vec<RecordAddress>, Vec<RecordAddress>, Vec<RecordAddress>)> =
+        type RelChains = (Vec<RecordAddress>, Vec<RecordAddress>, Vec<RecordAddress>);
+        let mut type_chains: std::collections::HashMap<u32, RelChains> =
             std::collections::HashMap::new();
 
         let mut current = node.first_rel;
@@ -847,14 +874,12 @@ impl GraphEngine {
 
         if !prev.is_null() {
             let mut prev_rel = self.rel_store.read_rel_at(self.db.pager(), prev)?;
-            if is_src_chain && prev_rel.source_node == rel.source_node {
+            let use_src = (is_src_chain && prev_rel.source_node == rel.source_node)
+                || (!is_src_chain && prev_rel.target_node != rel.target_node);
+            if use_src {
                 prev_rel.src_next_rel = next;
-            } else if is_src_chain {
-                prev_rel.dst_next_rel = next;
-            } else if prev_rel.target_node == rel.target_node {
-                prev_rel.dst_next_rel = next;
             } else {
-                prev_rel.src_next_rel = next;
+                prev_rel.dst_next_rel = next;
             }
             self.rel_store
                 .write_rel_at(self.db.pager(), prev, &prev_rel)?;
@@ -862,14 +887,12 @@ impl GraphEngine {
 
         if !next.is_null() {
             let mut next_rel = self.rel_store.read_rel_at(self.db.pager(), next)?;
-            if is_src_chain && next_rel.source_node == rel.source_node {
+            let use_src = (is_src_chain && next_rel.source_node == rel.source_node)
+                || (!is_src_chain && next_rel.target_node != rel.target_node);
+            if use_src {
                 next_rel.src_prev_rel = prev;
-            } else if is_src_chain {
-                next_rel.dst_prev_rel = prev;
-            } else if next_rel.target_node == rel.target_node {
-                next_rel.dst_prev_rel = prev;
             } else {
-                next_rel.src_prev_rel = prev;
+                next_rel.dst_prev_rel = prev;
             }
             self.rel_store
                 .write_rel_at(self.db.pager(), next, &next_rel)?;
@@ -925,6 +948,76 @@ pub struct LabelInfo {
 pub struct RelTypeInfo {
     pub token_id: u32,
     pub name: String,
+}
+
+#[derive(Debug)]
+pub struct ProfileResult {
+    pub result: QueryResult,
+    pub plan: String,
+    pub parse_time_us: u64,
+    pub plan_time_us: u64,
+    pub exec_time_us: u64,
+    pub total_time_us: u64,
+}
+
+impl std::fmt::Display for ProfileResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}", self.plan)?;
+        writeln!(f, "Rows: {}", self.result.rows.len())?;
+        writeln!(f, "Parse: {}us", self.parse_time_us)?;
+        writeln!(f, "Plan:  {}us", self.plan_time_us)?;
+        writeln!(f, "Exec:  {}us", self.exec_time_us)?;
+        writeln!(f, "Total: {}us", self.total_time_us)?;
+        if self.result.stats.nodes_created > 0 {
+            writeln!(f, "Nodes created: {}", self.result.stats.nodes_created)?;
+        }
+        if self.result.stats.relationships_created > 0 {
+            writeln!(f, "Rels created: {}", self.result.stats.relationships_created)?;
+        }
+        if self.result.stats.properties_set > 0 {
+            writeln!(f, "Props set: {}", self.result.stats.properties_set)?;
+        }
+        if self.result.stats.nodes_deleted > 0 {
+            writeln!(f, "Nodes deleted: {}", self.result.stats.nodes_deleted)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct TransactionBatch<'a> {
+    engine: &'a mut GraphEngine,
+    queries: Vec<(String, HashMap<String, Value>)>,
+}
+
+impl<'a> TransactionBatch<'a> {
+    pub fn new(engine: &'a mut GraphEngine) -> Self {
+        Self {
+            engine,
+            queries: Vec::new(),
+        }
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, cypher: &str) -> Self {
+        self.queries.push((cypher.to_string(), HashMap::new()));
+        self
+    }
+
+    pub fn add_with_params(mut self, cypher: &str, params: HashMap<String, Value>) -> Self {
+        self.queries.push((cypher.to_string(), params));
+        self
+    }
+
+    pub fn execute(self) -> Result<Vec<QueryResult>, GraphError> {
+        let mut results = Vec::with_capacity(self.queries.len());
+        for (cypher, params) in &self.queries {
+            let stmt = parser::parse(cypher).map_err(GraphError::QueryParse)?;
+            let plan = planner::plan(&stmt).map_err(GraphError::QueryPlan)?;
+            let result = executor::execute(self.engine, &plan, params)?;
+            results.push(result);
+        }
+        Ok(results)
+    }
 }
 
 #[cfg(test)]
@@ -1436,6 +1529,103 @@ mod tests {
 
         let neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
         assert_eq!(neighbors.len(), 1);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_explicit_dense_conversion() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let hub = engine.create_node("Hub").unwrap();
+        assert!(!engine.is_dense(hub).unwrap());
+
+        for _ in 0..8 {
+            let spoke = engine.create_node("Spoke").unwrap();
+            engine.create_relationship(hub, spoke, "CONN").unwrap();
+        }
+
+        assert!(!engine.is_dense(hub).unwrap());
+        engine.convert_to_dense(hub).unwrap();
+        assert!(engine.is_dense(hub).unwrap());
+
+        let neighbors = engine.get_neighbors(hub, Direction::Outgoing).unwrap();
+        assert_eq!(neighbors.len(), 8);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_profile() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_node("Person").unwrap();
+        engine.create_relationship(0, 1, "KNOWS").unwrap();
+        engine
+            .set_node_property(0, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+
+        let profile = engine
+            .profile("MATCH (a:Person) RETURN a.name")
+            .unwrap();
+        assert!(profile.result.rows.len() >= 1);
+        assert!(profile.plan.contains("NodeScan"));
+        assert!(profile.total_time_us > 0);
+
+        let display = format!("{profile}");
+        assert!(display.contains("Rows:"));
+        assert!(display.contains("Total:"));
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_transaction_batch() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+
+        let results = TransactionBatch::new(&mut engine)
+            .add("CREATE (a:Person {name: 'Alice'})")
+            .add("CREATE (b:Person {name: 'Bob'})")
+            .execute()
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].stats.nodes_created, 1);
+        assert_eq!(results[1].stats.nodes_created, 1);
+        assert_eq!(engine.node_count(), 2);
+
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_transaction_batch_with_params() {
+        let path = temp_path();
+        let mut engine = GraphEngine::create(&path, 4096).unwrap();
+        engine.create_node("Person").unwrap();
+        engine
+            .set_node_property(0, "name", PropertyValue::ShortString("Alice".into()))
+            .unwrap();
+
+        let mut params = std::collections::HashMap::new();
+        params.insert(
+            "name".to_string(),
+            crate::cypher::executor::Value::String("Alice".into()),
+        );
+
+        let results = TransactionBatch::new(&mut engine)
+            .add_with_params("MATCH (a:Person) WHERE a.name = $name RETURN a.name", params)
+            .execute()
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rows.len(), 1);
 
         drop(engine);
         let _ = std::fs::remove_file(&path);

@@ -336,16 +336,11 @@ impl Parser {
         let node = self.parse_node_pattern()?;
         elements.push(PatternElement::Node(node));
 
-        loop {
-            match self.peek() {
-                Token::Dash | Token::DashLBracket | Token::LtDash => {
-                    let rel = self.parse_rel_pattern()?;
-                    elements.push(PatternElement::Relationship(rel));
-                    let node = self.parse_node_pattern()?;
-                    elements.push(PatternElement::Node(node));
-                }
-                _ => break,
-            }
+        while let Token::Dash | Token::DashLBracket | Token::LtDash = self.peek() {
+            let rel = self.parse_rel_pattern()?;
+            elements.push(PatternElement::Relationship(rel));
+            let node = self.parse_node_pattern()?;
+            elements.push(PatternElement::Node(node));
         }
 
         Ok(Pattern { elements })
@@ -392,16 +387,14 @@ impl Parser {
             } else {
                 false
             }
+        } else if *self.peek() == Token::DashLBracket {
+            self.advance();
+            true
+        } else if *self.peek() == Token::Dash {
+            self.advance();
+            false
         } else {
-            if *self.peek() == Token::DashLBracket {
-                self.advance();
-                true
-            } else if *self.peek() == Token::Dash {
-                self.advance();
-                false
-            } else {
-                return Err(format!("expected - or -[ in relationship, got {:?}", self.peek()));
-            }
+            return Err(format!("expected - or -[ in relationship, got {:?}", self.peek()));
         };
 
         let mut variable = None;
@@ -625,12 +618,10 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.peek().clone() {
             Token::Integer(n) => {
-                let n = n;
                 self.advance();
                 Ok(Expr::Literal(Literal::Integer(n)))
             }
             Token::Float(f) => {
-                let f = f;
                 self.advance();
                 Ok(Expr::Literal(Literal::Float(f)))
             }

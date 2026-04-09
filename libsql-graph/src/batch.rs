@@ -11,6 +11,12 @@ struct BatchNode {
     properties: Vec<(String, PropertyValue)>,
 }
 
+impl Default for BatchNodeBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BatchNodeBuilder {
     pub fn new() -> Self {
         Self {
@@ -18,6 +24,7 @@ impl BatchNodeBuilder {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, label: &str) -> Self {
         self.entries.push(BatchNode {
             label: label.to_string(),
@@ -66,6 +73,12 @@ struct BatchRel {
     rel_type: String,
 }
 
+impl Default for BatchRelBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BatchRelBuilder {
     pub fn new() -> Self {
         Self {
@@ -73,6 +86,7 @@ impl BatchRelBuilder {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, source_id: u64, target_id: u64, rel_type: &str) -> Self {
         self.entries.push(BatchRel {
             source_id,

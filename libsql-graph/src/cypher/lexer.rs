@@ -252,7 +252,7 @@ impl Lexer {
                 s.push(ch);
                 self.advance();
             } else if ch == '.' && !is_float {
-                if self.input.get(self.pos + 1).map_or(false, |c| c.is_ascii_digit()) {
+                if self.input.get(self.pos + 1).is_some_and(|c| c.is_ascii_digit()) {
                     is_float = true;
                     s.push(ch);
                     self.advance();

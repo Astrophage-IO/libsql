@@ -555,6 +555,7 @@ fn exec_expand(
     Ok(results)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_var_length_expand(
     engine: &mut GraphEngine,
     current: &[Bindings],
@@ -1208,13 +1209,14 @@ fn expr_name(expr: &Expr) -> String {
         Expr::Variable(name) => name.clone(),
         Expr::Property(var, prop) => format!("{var}.{prop}"),
         Expr::FunctionCall(name, args) => {
-            let inner = args.first().map(|a| expr_name(a)).unwrap_or("*".into());
+            let inner = args.first().map(expr_name).unwrap_or("*".into());
             format!("{name}({inner})")
         }
         _ => "expr".to_string(),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn exec_merge(
     engine: &mut GraphEngine,
     _current: &[Bindings],
@@ -1310,13 +1312,12 @@ fn exec_merge(
 }
 
 fn simple_regex_match(text: &str, pattern: &str) -> bool {
-    if pattern.starts_with("(?i)") {
-        let pat = &pattern[4..];
+    if let Some(pat) = pattern.strip_prefix("(?i)") {
         return simple_regex_match(&text.to_lowercase(), &pat.to_lowercase());
     }
     let pat = pattern.strip_prefix('^').unwrap_or(pattern);
-    let (pat, must_end) = if pat.ends_with('$') {
-        (&pat[..pat.len() - 1], true)
+    let (pat, must_end) = if let Some(stripped) = pat.strip_suffix('$') {
+        (stripped, true)
     } else {
         (pat, false)
     };
